@@ -6,14 +6,19 @@
 // sends SIGHUP to the shells in its panes), removes its pid file and exits.
 // The next start begins with fresh tmux sessions and offers the saved windows
 // as dotted tabs. A restart does the same and then starts a new daemon on the
-// same port, running the code as it is on disk now.
+// same port, running the code as it is on disk now. A soft restart starts the
+// new daemon without touching tmux: sessions, windows and shells keep running
+// and pages reattach to them.
 import fs from 'node:fs';
-import { execFile, spawn } from 'node:child_process';
+import { execFile, execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { startServer, HOST, DEFAULT_SESSION } from './app.js';
 import { TMUX_BIN, TMUX_SOCKET, tmuxArgs } from './tmux-control.js';
-import { PID_FILE, STATE_DIR, LOG_FILE } from './paths.js';
+import { PID_FILE, STATE_DIR, LOG_FILE, HANDOVER_FILE } from './paths.js';
+import { exportKitty, importKitty } from './kitty-tracker.js';
 import { saveOnStop, ID_OPTION } from './saved-windows.js';
+import { closeAgents } from './agent-close.js';
+import { branchOf } from './git-branch.js';
 
 const port = Number(process.argv[2]);
 const restarted = process.argv[3] === '--restarted';
@@ -22,8 +27,15 @@ if (!Number.isInteger(port)) {
   process.exit(2);
 }
 
+// Bump only for a change a newer daemon could not read. Readers take the
+// sections they know and skip the rest, so adding a section needs no bump;
+// an unknown version is ignored, which costs only what it would have carried.
+const HANDOVER_VERSION = 1;
+
 process.title = 'dtmux';
 const log = (msg) => console.log(`${new Date().toISOString()} [${process.pid}] ${msg}`);
+
+takeHandOver();
 
 let server, wss;
 // After a restart the old daemon has just let go of the port; give the OS a
@@ -34,6 +46,7 @@ for (let tries = 0; ; tries++) {
       port,
       onStop: () => shutdown('Stop'),
       onRestart: () => shutdown('Restart button', { restart: true }),
+      onSoftRestart: () => shutdown('Soft restart button', { restart: true, soft: true }),
     }));
     break;
   } catch (err) {
@@ -50,7 +63,7 @@ fs.writeFileSync(PID_FILE, JSON.stringify({ pid: process.pid, port }) + '\n');
 log(`listening on http://${HOST}:${port}/  (tmux -L ${TMUX_SOCKET}, session "${DEFAULT_SESSION}")`);
 
 let stopping = false;
-function shutdown(signal, { restart = false } = {}) {
+function shutdown(signal, { restart = false, soft = false } = {}) {
   if (stopping) return;
   stopping = true;
   log(`${signal}: stopping`);
@@ -58,7 +71,7 @@ function shutdown(signal, { restart = false } = {}) {
   setTimeout(() => {
     log('shutdown took too long, exiting');
     process.exit(1);
-  }, 8000).unref();
+  }, 15000).unref(); // closing coding agents takes up to ~6 s of it
 
   // Stop listening first: a page reconnecting now must not reach this
   // daemon, which is about to take its tmux down (and, on a restart, must
@@ -66,14 +79,25 @@ function shutdown(signal, { restart = false } = {}) {
   const closed = new Promise((resolve) => server.close(resolve));
   server.closeIdleConnections?.();
   for (const ws of wss.clients) ws.close(1001, restart ? 'dtmux restarting' : 'dtmux stopping');
+  if (soft) {
+    // tmux stays up; only this process goes. Pages' tmux clients detach
+    // as their sockets close.
+    handOver(() => {
+      removePidFile();
+      server.closeAllConnections?.();
+      closed.then(() => {
+        startAgain();
+        log('stopped (soft restart: tmux left running)');
+        process.exit(0);
+      });
+    });
+    return;
+  }
   saveWindows(() => execFile(TMUX_BIN, tmuxArgs('kill-server'), (err, _out, stderr) => {
     // "no server running" just means no tmux session was ever opened.
     if (err && !/no server running|error connecting/i.test(stderr)) log(`tmux kill-server: ${stderr.trim() || err.message}`);
     else log(`tmux server "${TMUX_SOCKET}" stopped`);
-    try {
-      const cur = JSON.parse(fs.readFileSync(PID_FILE, 'utf8'));
-      if (cur.pid === process.pid) fs.unlinkSync(PID_FILE);
-    } catch {}
+    removePidFile();
     server.closeAllConnections?.();
     closed.then(() => {
       if (restart) startAgain();
@@ -81,6 +105,49 @@ function shutdown(signal, { restart = false } = {}) {
       process.exit(0);
     });
   }));
+}
+
+function removePidFile() {
+  try {
+    const cur = JSON.parse(fs.readFileSync(PID_FILE, 'utf8'));
+    if (cur.pid === process.pid) fs.unlinkSync(PID_FILE);
+  } catch {}
+}
+
+// What a soft restart passes on: the panes' kitty keyboard flags, which tmux
+// cannot report. Tied to the tmux server's pid, since pane ids start over
+// with a new server.
+function handOver(done) {
+  execFile(TMUX_BIN, tmuxArgs('display', '-p', '#{pid}'), (err, out) => {
+    try {
+      if (!err) fs.writeFileSync(HANDOVER_FILE, JSON.stringify({ version: HANDOVER_VERSION, tmuxPid: out.trim(), kitty: exportKitty() }) + '\n');
+    } catch (e) {
+      log(`could not write the hand-over: ${e.message}`);
+    }
+    done();
+  });
+}
+
+// Before any page connects, so the first snapshots already carry the flags.
+function takeHandOver() {
+  let data;
+  try {
+    data = JSON.parse(fs.readFileSync(HANDOVER_FILE, 'utf8'));
+    fs.unlinkSync(HANDOVER_FILE);
+  } catch {
+    return;
+  }
+  let tmuxPid = '';
+  try {
+    tmuxPid = execFileSync(TMUX_BIN, tmuxArgs('display', '-p', '#{pid}'), { encoding: 'utf8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+  } catch {}
+  if (!tmuxPid || tmuxPid !== data?.tmuxPid) return; // tmux restarted since: the pane ids mean other panes now
+  if ((data.version ?? 1) !== HANDOVER_VERSION) {
+    log(`ignoring a hand-over of version ${data.version}`);
+    return;
+  }
+  importKitty(data.kitty);
+  log(`picked up kitty keyboard state for ${data.kitty?.length ?? 0} pane(s) from the previous daemon`);
 }
 
 // The next daemon: same port, same environment, its output to the log.
@@ -105,20 +172,44 @@ const LIVE_FORMAT = [
   '#{window_index}',
   `#{${ID_OPTION}}`,
   '#{automatic-rename}',
+  '#{window_id}',
   '#{pane_current_path}',
   '#{window_name}',
 ].join('\t');
 
-// Every window of every session, written down before tmux goes away.
-function saveWindows(done) {
+// Every window of every session, written down before tmux goes away: its
+// directory and git branch, and, for a coding agent, how to resume it. The
+// agents are closed first so they print their resume lines (agent-close.js).
+async function saveWindows(done) {
+  const sessions = await new Promise((resolve) =>
+    execFile(TMUX_BIN, tmuxArgs('list-sessions', '-F', '#{session_name}'), (err, out) =>
+      resolve(err ? [] : out.split('\n').filter(Boolean)),
+    ),
+  );
+  const agents = new Map(); // window id -> the agent to resume there
+  for (const found of await Promise.all(sessions.map((s) => closeAgents(s, { log }).catch(() => [])))) {
+    for (const a of found) if (a.command && (!agents.has(a.window) || a.active)) agents.set(a.window, a);
+  }
+  if (agents.size) log(`closed ${agents.size} coding agent(s) to resume later`);
   execFile(TMUX_BIN, tmuxArgs('list-windows', '-a', '-F', LIVE_FORMAT), (err, out, stderr) => {
     const live = [];
     if (err) {
       if (!/no server running|error connecting/i.test(stderr)) log(`list-windows: ${stderr.trim() || err.message}`);
     } else {
       for (const line of out.split('\n').filter(Boolean)) {
-        const [session, index, id, auto, dir, ...name] = line.split('\t');
-        live.push({ session, index: Number(index), id, autoName: auto === '1', dir, name: name.join('\t') });
+        const [session, index, id, auto, windowId, paneDir, ...name] = line.split('\t');
+        const agent = agents.get(windowId);
+        const dir = agent?.dir || paneDir;
+        live.push({
+          session,
+          index: Number(index),
+          id,
+          autoName: auto === '1',
+          dir,
+          branch: branchOf(dir),
+          agent: agent ? { name: agent.agent, command: agent.command } : null,
+          name: name.join('\t'),
+        });
       }
     }
     try {
@@ -133,3 +224,5 @@ function saveWindows(done) {
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
 process.on('SIGHUP', () => {}); // detached; a closing terminal is not a reason to stop
+// `dtmux restart`: a soft restart, tmux left running.
+process.on('SIGUSR2', () => shutdown('SIGUSR2', { restart: true, soft: true }));

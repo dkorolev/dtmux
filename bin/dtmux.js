@@ -3,6 +3,8 @@
 //
 //   dtmux [start]     start the daemon unless it is already running
 //   dtmux kill|stop   stop it gently, taking its tmux sessions with it
+//   dtmux restart     run the code on disk now, tmux and its shells untouched
+//                     (--full: save the windows and end tmux too)
 //   dtmux status      say whether it is running, and where
 //   dtmux config      validate ~/.dtmux.yaml and print the effective config
 import fs from 'node:fs';
@@ -129,7 +131,9 @@ async function start() {
   die(`the daemon did not come up; see ${LOG_FILE}`);
 }
 
-async function stop() {
+// The running daemon: from the pid file, else whatever dtmux answers on the
+// configured port.
+async function runningDaemon() {
   let target = recordedDaemon();
   if (!target) {
     // No usable pid file: fall back to whatever dtmux answers on the configured port.
@@ -137,19 +141,59 @@ async function stop() {
     const up = await probe(port);
     if (up?.app === 'dtmux') target = up;
   }
+  return target;
+}
+
+async function stop() {
+  const target = await runningDaemon();
   if (!target) {
     console.log('dtmux is not running');
     return;
   }
   process.kill(target.pid, 'SIGTERM');
-  for (let i = 0; i < 100; i++) {
+  for (let i = 0; i < 200; i++) {
     if (!isAlive(target.pid)) {
       console.log(`dtmux stopped (pid ${target.pid}); its tmux sessions are gone`);
       return;
     }
     await sleep(100);
   }
-  die(`pid ${target.pid} is still running after 10s; see ${LOG_FILE}`);
+  die(`pid ${target.pid} is still running after 20s; see ${LOG_FILE}`);
+}
+
+// Soft restart from outside, so it works whatever code the running daemon
+// has. SIGUSR2 asks it to hand over and start its successor. A daemon from
+// before soft restarts dies of SIGUSR2 instead, and one that hangs is killed:
+// either way only the daemon goes. tmux runs as its own process and keeps
+// every session, and a fresh daemon attaches to it.
+async function restart(full) {
+  const target = await runningDaemon();
+  if (!target) {
+    console.log('dtmux is not running; starting it');
+    return start();
+  }
+  if (full) {
+    await stop();
+    return start();
+  }
+  const port = target.port ?? config().port;
+  process.kill(target.pid, 'SIGUSR2');
+  for (let i = 0; i < 50 && isAlive(target.pid); i++) await sleep(100);
+  if (isAlive(target.pid)) {
+    console.log(`pid ${target.pid} did not hand over in 5s; stopping only it (tmux keeps running)`);
+    process.kill(target.pid, 'SIGKILL');
+    for (let i = 0; i < 20 && isAlive(target.pid); i++) await sleep(100);
+  }
+  // Its successor, if it started one.
+  for (let i = 0; i < 30; i++) {
+    const up = await probe(port);
+    if (up?.app === 'dtmux' && up.pid !== target.pid) {
+      console.log(`dtmux restarted: http://${HOST}:${port}/  (pid ${up.pid}; tmux kept running)`);
+      return;
+    }
+    await sleep(100);
+  }
+  await start();
 }
 
 async function status() {
@@ -167,15 +211,19 @@ function showConfig() {
   for (const [k, v] of Object.entries(cfg)) console.log(`${k}: ${v}`);
 }
 
-const USAGE = `usage: dtmux [start | kill | stop | status | config]
+const USAGE = `usage: dtmux [start | restart [--full] | kill | stop | status | config]
 
   start    start the daemon unless it is running (the default)
+  restart  run the code on disk now; tmux, its windows and shells keep running
+           (--full: save the windows as dotted tabs and end tmux as well)
   kill     stop it gently; its tmux sessions end with it (alias: stop)
   status   is it running, and on which port
   config   validate ${CONFIG_PATH} and print the effective config`;
 
 const cmd = process.argv[2] ?? 'start';
 const commands = { start, kill: stop, stop, status, config: showConfig };
+const args = process.argv.slice(3);
 if (cmd === '-h' || cmd === '--help' || cmd === 'help') console.log(USAGE);
-else if (!commands[cmd] || process.argv.length > 3) die(`unknown command "${process.argv.slice(2).join(' ')}"\n${USAGE}`, 2);
+else if (cmd === 'restart' && (args.length === 0 || (args.length === 1 && args[0] === '--full'))) await restart(args[0] === '--full');
+else if (!commands[cmd] || args.length) die(`unknown command "${process.argv.slice(2).join(' ')}"\n${USAGE}`, 2);
 else await commands[cmd]();

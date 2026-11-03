@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 process.env.DTMUX_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'dtmux-saved-'));
-const { saveOnStop, savedFor, takeSaved, SAVED_FILE } = await import('../server/saved-windows.js');
+const { saveOnStop, savedFor, takeSaved, addSaved, SAVED_FILE } = await import('../server/saved-windows.js');
 
 const live = (session, index, id, name, dir, autoName = false) => ({ session, index, id, name, dir, autoName });
 
@@ -56,4 +56,27 @@ test('a stop with no tmux running keeps everything saved', () => {
   const before = savedFor('dtmux');
   saveOnStop([]);
   assert.deepEqual(savedFor('dtmux'), before);
+});
+
+test('a disconnected window is saved like a stopped one, once per id, and can be forgotten', () => {
+  addSaved('disc', { id: 'd1', name: 'work', autoName: false, dir: '/tmp' });
+  addSaved('disc', { id: 'd1', name: 'work2', autoName: false, dir: '/usr' });
+  assert.deepEqual(savedFor('disc').map((w) => [w.id, w.name, w.dir]), [['d1', 'work2', '/usr']]);
+  const stored = JSON.parse(fs.readFileSync(SAVED_FILE, 'utf8')).sessions.disc;
+  assert.equal(stored.length, 1);
+  assert.equal(takeSaved('disc', 'd1').name, 'work2');
+  assert.deepEqual(savedFor('disc'), []);
+});
+
+test('saved windows keep their branch and agent, and drop anything else', () => {
+  addSaved('agents', { id: 'a1', name: 'w', dir: '/tmp', branch: 'feature', agent: { name: 'Claude Code', command: 'claude --resume x' }, junk: 1 });
+  addSaved('agents', { id: 'a2', name: 'v', dir: '/tmp', branch: '', agent: { name: 'Codex' } });
+  assert.deepEqual(savedFor('agents'), [
+    { id: 'a1', name: 'w', autoName: false, dir: '/tmp', branch: 'feature', agent: { name: 'Claude Code', command: 'claude --resume x' } },
+    { id: 'a2', name: 'v', autoName: false, dir: '/tmp' },
+  ]);
+  const n = saveOnStop([{ session: 'agents', index: 0, id: 'a3', name: 'x', dir: '/', autoName: false, branch: 'main', agent: { name: 'Codex', command: 'codex resume --last' } }]);
+  assert.ok(n >= 3);
+  assert.deepEqual(savedFor('agents')[0].agent, { name: 'Codex', command: 'codex resume --last' });
+  assert.equal(savedFor('agents')[0].branch, 'main');
 });

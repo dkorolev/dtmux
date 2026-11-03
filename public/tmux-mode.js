@@ -36,6 +36,8 @@ export function startTmuxMode({ container, toolbar, params }) {
   const ORDER_KEY = `dtmux.tabOrder.${params.get('session') || ''}`;
   let tabOrder = loadOrder();
   const tabEls = new Map(); // key -> button
+  const tabInfo = new Map(); // window id -> { panes, at }: the tooltip's facts, fetched on hover
+  const closingTabs = new Set(); // keys of tabs being disconnected (their agent is asked to quit first)
   let activePane = null;
   let prefix = null; // tmux key name, e.g. "C-a"
   let prefixArmed = false;
@@ -75,9 +77,11 @@ export function startTmuxMode({ container, toolbar, params }) {
       const msg = JSON.parse(ev.data);
       switch (msg.t) {
         case 'idle':
+          if (reloadIfStale(msg.build)) return;
           showIdle(msg.session);
           break;
         case 'hello':
+          if (reloadIfStale(msg.build)) return;
           stage.querySelector('.tmux-overlay.idle')?.remove();
           newWindowButton.disabled = false;
           prefix = msg.prefix && msg.prefix !== 'None' ? msg.prefix : null;
@@ -92,6 +96,10 @@ export function startTmuxMode({ container, toolbar, params }) {
           applyState(msg);
           break;
         case 'init':
+          // A terminal kept across a reconnect starts over from the snapshot.
+          panes.get(msg.p)?.term.reset();
+          panes.get(msg.p)?.term.write(base64ToBytes(msg.d));
+          break;
         case 'out':
           panes.get(msg.p)?.term.write(base64ToBytes(msg.d));
           break;
@@ -103,6 +111,10 @@ export function startTmuxMode({ container, toolbar, params }) {
           break;
         case 'journal':
           showJournal(msg);
+          break;
+        case 'info':
+          tabInfo.set(msg.w, { panes: msg.panes, at: Date.now() });
+          renderTabs();
           break;
         case 'saved':
           savedWindows = Array.isArray(msg.windows) ? msg.windows : [];
@@ -117,6 +129,24 @@ export function startTmuxMode({ container, toolbar, params }) {
     };
   }
 
+  // The files on disk changed since this page loaded them (a soft restart to
+  // new code, or just an edit): load them. Nothing is lost, since everything
+  // lives in tmux and the tab order in localStorage. At most once in 10 s, so
+  // files still being written cannot make it loop.
+  function reloadIfStale(build) {
+    const mine = document.getElementById('status').dataset.build;
+    if (!build || !mine || mine.startsWith('__') || build === mine) return false;
+    try {
+      const last = Number(sessionStorage.getItem('dtmux.reloadedAt')) || 0;
+      if (Date.now() - last < 10000) return false;
+      sessionStorage.setItem('dtmux.reloadedAt', String(Date.now()));
+    } catch {}
+    ended = true; // the socket closing now is ours
+    ws.close();
+    location.reload();
+    return true;
+  }
+
   // The daemon went away (restarting, stopped, crashed): drop the dead panes,
   // keep the tabs where they are, dimmed, and keep retrying on our own. Only
   // if that takes a while, say how to start the daemon again; a restart is
@@ -124,7 +154,9 @@ export function startTmuxMode({ container, toolbar, params }) {
   const OVERLAY_DELAY_MS = 1500;
   function retryConnect(reason) {
     if (!retry) {
-      resetView();
+      // The panes stay on screen, dimmed: after a soft restart the same tmux
+      // panes come back and these terminals pick up where they were.
+      resetView({ keepPanes: true });
       newWindowButton.disabled = true;
       restartButton.disabled = true;
       const restarting = reason === 'dtmux restarting';
@@ -139,6 +171,7 @@ export function startTmuxMode({ container, toolbar, params }) {
   }
   function showRetryOverlay(stopped) {
     if (!retry) return;
+    dropPanes();
     {
       const { countEl } = retry;
       const box = document.createElement('div');
@@ -176,6 +209,12 @@ export function startTmuxMode({ container, toolbar, params }) {
   // starts the session with it. Or start the session empty from here.
   function showIdle(session) {
     sessionName = session;
+    // The session can end under a connected page (its last window was
+    // disconnected): drop its panes, keep the tabs.
+    dropPanes();
+    liveWindows = [];
+    activeWindow = null;
+    activePane = null;
     newWindowButton.disabled = true;
     toolbar.setStatus(params.get('session') ? `dtmux · ${session}` : 'dtmux', 'brand');
     haveState = true;
@@ -219,11 +258,19 @@ export function startTmuxMode({ container, toolbar, params }) {
     btn.focus(); // Enter or Space starts it
   }
 
-  function resetView() {
+  function dropPanes() {
+    stage.classList.remove('stale');
     for (const pane of panes.values()) pane.term.dispose();
     panes.clear();
     for (const el of windowEls.values()) el.remove();
     windowEls.clear();
+  }
+
+  function resetView({ keepPanes = false } = {}) {
+    if (keepPanes) stage.classList.add('stale');
+    else dropPanes();
+    closeTabMenu();
+    hideTip();
     stage.querySelector('.tmux-overlay')?.remove();
     closePrompt?.(null);
     for (const el of stage.querySelectorAll('.tmux-notice, .tmux-journal')) el.remove();
@@ -349,7 +396,7 @@ export function startTmuxMode({ container, toolbar, params }) {
     el.title = 'Click to dismiss';
     el.addEventListener('click', () => el.remove());
     stage.append(el);
-    setTimeout(() => el.remove(), Math.min(20000, 4000 + text.length * 40));
+    setTimeout(() => el.remove(), Math.min(5000, 2500 + text.length * 20));
   }
 
   function applyState({ windows, panes: list }) {
@@ -405,6 +452,7 @@ export function startTmuxMode({ container, toolbar, params }) {
     for (const info of list) panes.get(info.id)?.el.classList.toggle('active', info.active);
     liveWindows = windows;
     haveState = true;
+    stage.classList.remove('stale');
     renderTabs();
     if (pane && (pane.id !== activePane || win.id !== activeWindow)) {
       activeWindow = win.id;
@@ -574,13 +622,21 @@ export function startTmuxMode({ container, toolbar, params }) {
       }
       const label = t.w.name;
       if (el.textContent !== label) el.textContent = label;
-      el.className = t.kind === 'live' ? (t.w.active ? 'active' : '') : t.kind === 'pending' ? 'saved pending' : 'saved';
-      el.title =
+      if (t.kind !== 'live') closingTabs.delete(t.key); // closed: done
+      el.className =
         t.kind === 'live'
-          ? `tmux window ${t.w.index}: ${t.w.name}\nDrag to reorder.`
+          ? `${t.w.active ? 'active' : ''}${closingTabs.has(t.key) ? ' closing' : ''}`
           : t.kind === 'pending'
-            ? `Reopening in ${t.w.dir}…`
-            : `Saved when dtmux stopped: ${t.w.dir}\nTap to reopen it there. Drag to reorder.`;
+            ? 'saved pending'
+            : 'saved';
+      const title =
+        t.kind === 'live'
+          ? liveTabTitle(t.w)
+          : t.kind === 'pending'
+            ? `${t.w.name}\nReopening in ${t.w.dir}…`
+            : savedTabTitle(t.w);
+      el.dataset.tip = title;
+      if (tip?.el === el) showTip(el); // open: show the fresh facts
       const want = prev ? prev.nextSibling : toolbar.tabs.firstChild;
       if (want !== el) toolbar.tabs.insertBefore(el, want);
       prev = el;
@@ -589,10 +645,101 @@ export function startTmuxMode({ container, toolbar, params }) {
     if (landed) syncTmuxOrder();
   }
 
+  // The tooltip of a live tab: per pane, where it is, how long it has been
+  // open and what runs there, coding agents by name. Fresh facts are asked
+  // for whenever the pointer comes onto the tab.
+  function liveTabTitle(w) {
+    const lines = [w.name];
+    const info = tabInfo.get(w.id);
+    if (!info) lines.push('…');
+    else {
+      const age = (secs) => (secs == null ? null : duration(secs + Math.round((Date.now() - info.at) / 1000)));
+      const several = info.panes.length > 1;
+      for (const p of info.panes) {
+        if (several) lines.push('');
+        const open = age(p.openSecs);
+        lines.push(`${several && p.active ? '▸ ' : ''}${p.dir}${open ? `  ·  open ${open}` : ''}`);
+        if (p.running) {
+          const ran = age(p.running.secs);
+          lines.push(`${p.running.agent ?? p.running.what}${ran ? `  ·  running ${ran}` : ''}`);
+        }
+      }
+    }
+    lines.push('', 'Drag to reorder · right-click for more');
+    return lines.join('\n');
+  }
+  function savedTabTitle(w) {
+    const lines = [w.name, `${w.dir}${w.branch ? `  ·  ${w.branch}` : ''}`];
+    if (w.agent) lines.push(`Tap to resume ${w.agent.name}:`, `  ${w.agent.command}`);
+    else lines.push('Saved, not running. Tap to start it again there.');
+    lines.push('', 'Drag to reorder · right-click for more');
+    return lines.join('\n');
+  }
+  function duration(secs) {
+    const d = Math.floor(secs / 86400);
+    const h = Math.floor((secs % 86400) / 3600);
+    const m = Math.floor((secs % 3600) / 60);
+    if (d) return `${d}d ${h}h`;
+    if (h) return `${h}h ${m}m`;
+    if (m) return `${m}m`;
+    return `${secs}s`;
+  }
+
+  // dtmux's own tooltip under a tab: shown after a short rest of the mouse,
+  // updated in place when fresher facts arrive, gone on leave or press.
+  // (The browser's title tooltip shows late, never updates, and not in
+  // every browser.)
+  const TIP_DELAY_MS = 350;
+  let tip = null; // { el, box } while shown, { el, timer } while waiting
+  function armTip(el) {
+    hideTip();
+    tip = { el, timer: setTimeout(() => showTip(el), TIP_DELAY_MS) };
+  }
+  function showTip(el) {
+    if (!el.isConnected || draggingTab || tabMenu) return hideTip();
+    clearTimeout(tip?.timer);
+    const box = tip?.box ?? document.createElement('div');
+    box.className = 'tab-tip';
+    const [head, ...rest] = (el.dataset.tip || '').split('\n');
+    const strong = document.createElement('strong');
+    strong.textContent = head;
+    box.replaceChildren(strong, ...rest.map((line) => {
+      const div = document.createElement('div');
+      div.textContent = line || '\u00a0';
+      if (/^Drag to reorder/.test(line)) div.className = 'hint';
+      return div;
+    }));
+    if (!box.isConnected) document.body.append(box);
+    tip = { el, box };
+    const r = el.getBoundingClientRect();
+    const w = box.offsetWidth;
+    box.style.left = `${Math.max(6, Math.min(r.left, innerWidth - w - 6))}px`;
+    box.style.top = `${r.bottom + 6}px`;
+  }
+  function hideTip() {
+    if (!tip) return;
+    clearTimeout(tip.timer);
+    tip.box?.remove();
+    tip = null;
+  }
+
   function tabButton(key) {
     const b = document.createElement('button');
     b.dataset.key = key;
-    b.addEventListener('pointerdown', (e) => startTabDrag(e, b));
+    b.addEventListener('pointerenter', (e) => {
+      const t = tabItems.get(key);
+      if (t?.kind === 'live') send({ t: 'info', w: t.w.id });
+      if (e.pointerType === 'mouse') armTip(b);
+    });
+    b.addEventListener('pointerleave', () => hideTip());
+    b.addEventListener('pointerdown', (e) => {
+      hideTip();
+      startTabDrag(e, b);
+    });
+    b.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      showTabMenu(key, e.clientX, e.clientY);
+    });
     b.addEventListener('click', () => {
       const t = tabItems.get(key);
       if (!t || !haveState) return;
@@ -670,6 +817,94 @@ export function startTmuxMode({ container, toolbar, params }) {
     window.addEventListener('pointerup', up, true);
     window.addEventListener('pointercancel', up, true);
     window.addEventListener('blur', done);
+  }
+
+  // Right-click on a tab. Live: Disconnect saves the window and closes it, so
+  // it turns dotted in place and a tap starts it again. Dotted: Reopen, or
+  // Forget it for good.
+  let tabMenu = null;
+  function showTabMenu(key, x, y) {
+    closeTabMenu();
+    const t = tabItems.get(key);
+    if (!t || !haveState || t.kind === 'pending') return;
+    showMenu(
+      t.kind === 'live'
+        ? [
+            [
+              'Disconnect',
+              'Save this window and close it; a coding agent in it is closed first and resumes when you tap the dotted tab',
+              () => {
+                closingTabs.add(key);
+                setTimeout(() => closingTabs.delete(key) && renderTabs(), 10000);
+                send({ t: 'disconnect', w: t.w.id });
+                renderTabs();
+              },
+            ],
+          ]
+        : [
+            ['Reopen', `Start it again in ${t.w.dir}`, () => tabEls.get(key)?.click()],
+            ['Forget', 'Remove this dotted tab for good', () => send({ t: 'forget', id: key })],
+          ],
+      x,
+      y,
+    );
+  }
+
+  // A small menu at (x, y): items are [label, title, action].
+  function showMenu(items, x, y) {
+    closeTabMenu();
+    hideTip();
+    const menu = document.createElement('div');
+    menu.className = 'tab-menu';
+    menu.setAttribute('role', 'menu');
+    for (const [label, title, run] of items) {
+      const b = document.createElement('button');
+      b.textContent = label;
+      b.title = title;
+      b.setAttribute('role', 'menuitem');
+      b.addEventListener('click', () => {
+        closeTabMenu();
+        run();
+        panes.get(activePane)?.term.focus();
+      });
+      menu.append(b);
+    }
+    document.body.append(menu);
+    // Keep it on screen.
+    const r = menu.getBoundingClientRect();
+    menu.style.left = `${Math.max(4, Math.min(x, innerWidth - r.width - 4))}px`;
+    menu.style.top = `${Math.max(4, Math.min(y, innerHeight - r.height - 4))}px`;
+    const away = (e) => {
+      if (!menu.contains(e.target)) closeTabMenu();
+    };
+    const key_ = (e) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        e.stopPropagation();
+        closeTabMenu();
+        panes.get(activePane)?.term.focus();
+      }
+    };
+    window.addEventListener('pointerdown', away, true);
+    window.addEventListener('keydown', key_, true);
+    window.addEventListener('blur', closeTabMenu);
+    window.addEventListener('resize', closeTabMenu);
+    tabMenu = {
+      menu,
+      off() {
+        window.removeEventListener('pointerdown', away, true);
+        window.removeEventListener('keydown', key_, true);
+        window.removeEventListener('blur', closeTabMenu);
+        window.removeEventListener('resize', closeTabMenu);
+      },
+    };
+    menu.querySelector('button').focus();
+  }
+  function closeTabMenu() {
+    if (!tabMenu) return;
+    tabMenu.off();
+    tabMenu.menu.remove();
+    tabMenu = null;
   }
 
   // Live windows in toolbar order.
@@ -758,26 +993,48 @@ export function startTmuxMode({ container, toolbar, params }) {
     title: 'New tmux window',
   });
 
+  // Both restarts run the code on disk now. Soft: only dtmux restarts; tmux
+  // and every shell keep running and the page reattaches. Full: the windows
+  // are saved as dotted tabs and tmux ends with everything in it.
+  function askRestart(t) {
+    const asked = ws;
+    send({ t });
+    // A daemon older than this page (which is read fresh from disk) ignores
+    // a restart it does not know.
+    setTimeout(() => {
+      if (ws !== asked || ws.readyState !== WebSocket.OPEN) return;
+      const cmd = document.getElementById('status').dataset.startCmd || 'dtmux';
+      showNotice(
+        t === 'soft-restart'
+          ? `This dtmux daemon is older than this page. Run in a terminal (tmux keeps running):\n${cmd} restart`
+          : `This dtmux daemon is older than this page. Run in a terminal:\n${cmd} restart --full`,
+        'bad',
+      );
+    }, 3000);
+  }
   const restartButton = toolbar.addButton(
     '↻ Restart',
     () => {
-      const ok = confirm(
-        'Restart dtmux?\n\nEvery shell and program in it ends. The windows are saved and come back as dotted tabs: tap one to reopen it.',
+      const r = restartButton.getBoundingClientRect();
+      showMenu(
+        [
+          ['Soft restart', 'Restart dtmux only: tmux and every shell keep running', () => askRestart('soft-restart')],
+          [
+            'Full restart…',
+            'Save the windows as dotted tabs and end tmux with every shell in it',
+            () => {
+              const ok = confirm(
+                'Full restart of dtmux?\n\nEvery shell and program in it ends. The windows are saved and come back as dotted tabs: tap one to reopen it.',
+              );
+              if (ok) askRestart('restart');
+            },
+          ],
+        ],
+        r.right,
+        r.bottom + 4,
       );
-      if (!ok) return;
-      const asked = ws;
-      send({ t: 'restart' });
-      // A daemon started before the Restart button existed ignores it, while
-      // this page, read fresh from disk, already has the button.
-      setTimeout(() => {
-        if (ws === asked && ws.readyState === WebSocket.OPEN)
-          showNotice(
-            `This dtmux daemon is older than this page and cannot restart itself. Run once in a terminal:\n${document.getElementById('status').dataset.startCmd || 'dtmux'} kill && ${document.getElementById('status').dataset.startCmd || 'dtmux'}`,
-            'bad',
-          );
-      }, 3000);
     },
-    { title: 'Restart dtmux with the code on disk now; the windows are saved as dotted tabs' },
+    { title: 'Restart dtmux with the code on disk now' },
   );
   restartButton.classList.add('restart');
   restartButton.disabled = true;

@@ -3,7 +3,8 @@
 // Each tmux pane becomes its own xterm.js terminal in the browser, so the
 // browser holds the real scrollback and scrolling never round-trips to tmux.
 // Messages to the browser, all JSON:
-//   hello  { session, prefix, commit }    once attached
+//   hello  { session, prefix, commit, build }  once attached; `build` fingerprints
+//                                         the page's files, see app.js
 //   state  { windows, panes }             after any structural change; each
 //                                         window carries its long id as `uid`
 //   init   { p, d }                       a pane's history and modes, base64
@@ -16,7 +17,7 @@
 //                                         a resume command showed up on a pane
 //   saved  { windows: [{ id, name, dir }] }
 //                                         windows saved when dtmux last stopped
-//   idle   { session }                    the session does not exist but saved
+//   idle   { session, build }             the session does not exist but saved
 //                                         windows do: nothing is started until
 //                                         the page sends resume or new-session
 // Messages from the browser:
@@ -28,9 +29,14 @@
 //   resize-pane { p, axis, size }  drag a border; axis "x" (width) or "y" (height)
 //   resume { id }          reopen a saved window: same name, same directory
 //   reorder { ws }         put tmux's windows in this order (window ids, a tab drag)
+//   info { w }             what the tab's tooltip shows, answered with
+//                          info { w, panes: [{ id, active, dir, openSecs, running }] }
+//   disconnect { w }       save a window for later and close it: it turns dotted
+//   forget { id }          drop a saved window for good
 //   new-session            while idle: start the session empty
 //   stop                   stop the whole daemon
-//   restart                stop the daemon and start it again (the Restart button)
+//   restart                stop the daemon and start it again: windows saved, tmux ended
+//   soft-restart           start the daemon again, leaving tmux and its shells running
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -40,7 +46,10 @@ import { trackKitty, recordKittyCommand, kittyRestoreSequence, forgetPane } from
 import { openExternal } from './open-external.js';
 import { parseBinding, fillTemplate } from './tmux-bindings.js';
 import { findResumeHint } from './resume-hint.js';
-import { savedFor, takeSaved, savedEvents, newWindowId, ID_OPTION } from './saved-windows.js';
+import { windowInfo } from './pane-info.js';
+import { closeAgents } from './agent-close.js';
+import { branchOf, restoreBranch } from './git-branch.js';
+import { savedFor, takeSaved, addSaved, savedEvents, newWindowId, ID_OPTION } from './saved-windows.js';
 
 const HISTORY_LINES = 10000; // keep in sync with the browser's scrollback
 const SEND_CHUNK = 256; // bytes per send-keys command
@@ -100,6 +109,24 @@ const MODE_NOTICES = {
 // client (a menu, the pane picker, a prompt from a nested binding).
 const UNWEDGE_KEYS = ['Escape', 'C-c', 'Escape', 'C-c'];
 
+// What a page sees of a saved window.
+const pageEntry = ({ id, name, dir, branch, agent }) => ({ id, name, dir, branch: branch ?? null, agent: agent ?? null });
+
+// Directories of every open pane, to know which checkouts are in use.
+function openDirs() {
+  try {
+    return execFileSync(TMUX_BIN, tmuxArgs('list-panes', '-a', '-F', '#{pane_current_path}'), {
+      encoding: 'utf8',
+      timeout: 3000,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    })
+      .split('\n')
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
 const isPaneId = (s) => typeof s === 'string' && /^%\d+$/.test(s);
 const isWindowId = (s) => typeof s === 'string' && /^@\d+$/.test(s);
 
@@ -107,13 +134,13 @@ const isWindowId = (s) => typeof s === 'string' && /^@\d+$/.test(s);
 // start nothing: show the saved windows and let the page pick one to start
 // the session with, or ask for an empty session.
 export function attachTmuxSession(ws, opts) {
-  const { session, onStop = () => {}, onRestart = () => {} } = opts;
+  const { session, onStop = () => {}, onRestart = () => {}, onSoftRestart = () => {} } = opts;
   const exists = (cb) => execFile(TMUX_BIN, tmuxArgs('has-session', '-t', `=${session}`), (err) => cb(!err));
   exists((yes) => {
     if (yes || !savedFor(session).length) return bridge(ws, opts);
     const send = (msg) => ws.readyState === ws.OPEN && ws.send(JSON.stringify(msg));
     const sendSaved = () =>
-      send({ t: 'saved', windows: savedFor(session).map(({ id, name, dir }) => ({ id, name, dir })) });
+      send({ t: 'saved', windows: savedFor(session).map(pageEntry) });
     const onSavedChange = (s) => s === session && sendSaved();
     let { cols, rows } = opts;
     let starting = false;
@@ -152,21 +179,26 @@ export function attachTmuxSession(ws, opts) {
       else if (msg.t === 'resume' && typeof msg.id === 'string') {
         const entry = takeSaved(session, msg.id);
         if (entry) start(entry);
-      } else if (msg.t === 'stop') onStop();
+      } else if (msg.t === 'forget' && typeof msg.id === 'string') takeSaved(session, msg.id);
+      else if (msg.t === 'stop') onStop();
       else if (msg.t === 'restart') onRestart();
+      else if (msg.t === 'soft-restart') onSoftRestart();
     }
     ws.on('message', onMessage);
     ws.on('close', leave);
     savedEvents.on('change', onSavedChange);
     sendSaved(); // ahead of idle, so the page draws the dotted tabs at once
-    send({ t: 'idle', session });
+    send({ t: 'idle', session, build: opts.build });
   });
 }
 
 // `first`: a saved window to start a new session with. `reopen`: a saved
 // window to open in the (existing) session once attached.
-function bridge(ws, { session, cols, rows, commit = '', onStop = () => {}, onRestart = () => {}, first = null, reopen = [] }) {
+function bridge(ws, opts) {
+  const { session, commit = '', build = '', onStop = () => {}, onRestart = () => {}, onSoftRestart = () => {}, first = null, reopen = [] } = opts;
+  let { cols, rows } = opts;
   const firstDir = first && (isDir(first.dir) ? first.dir : os.homedir());
+  const firstBranchNote = first && firstDir === first.dir ? restoreBranch(firstDir, first.branch, openDirs()) : null;
   const tmux = new TmuxControl({
     session,
     cols,
@@ -176,6 +208,7 @@ function bridge(ws, { session, cols, rows, commit = '', onStop = () => {}, onRes
   });
   // Ahead of every other command, so the first window keeps its saved id.
   if (first) tmux.run(`set-option -w ${ID_OPTION} ${quote(first.id)}`);
+  if (first?.agent) tmux.run('display -p "#{pane_id}"', (err, lines) => !err && typeAgent(lines[0], first.agent));
   const panes = new Map(); // pane id -> { ready }
   const tails = new Map(); // pane id -> recent plain text, for resume hints
   const journaled = new Set(); // resume commands already shown this connection
@@ -209,7 +242,15 @@ function bridge(ws, { session, cols, rows, commit = '', onStop = () => {}, onRes
   tmux.on('exit', (reason) => {
     // Tell the page whether the session itself is gone (its last shell
     // exited) or only this client was detached, so it can offer the right fix.
+    // A session that ended with saved windows left (its last window was
+    // disconnected, say) goes back to idle: the dotted tabs, nothing started.
     execFile(TMUX_BIN, tmuxArgs('has-session', '-t', `=${session}`), (err) => {
+      if (ws.readyState !== ws.OPEN) return;
+      if (err && savedFor(session).length) {
+        detach();
+        attachTmuxSession(ws, { ...opts, cols, rows, first: null, reopen: [] });
+        return;
+      }
       send({ t: 'exit', reason, sessionGone: Boolean(err) });
       ws.close();
     });
@@ -220,11 +261,11 @@ function bridge(ws, { session, cols, rows, commit = '', onStop = () => {}, onRes
     if (err) return;
     const [name, prefix] = lines[0].split('\t');
     clientName = name;
-    send({ t: 'hello', session, prefix, commit });
+    send({ t: 'hello', session, prefix, commit, build });
     sendSaved();
   });
   const sendSaved = () =>
-    send({ t: 'saved', windows: savedFor(session).map(({ id, name, dir }) => ({ id, name, dir })) });
+    send({ t: 'saved', windows: savedFor(session).map(pageEntry) });
   const onSavedChange = (s) => s === session && sendSaved();
   savedEvents.on('change', onSavedChange);
   loadBindings();
@@ -232,6 +273,7 @@ function bridge(ws, { session, cols, rows, commit = '', onStop = () => {}, onRes
   for (const entry of reopen) openSaved(entry);
   if (first && firstDir !== first.dir)
     send({ t: 'notice', text: `${first.dir || 'The saved directory'} is gone; opened "${first.name}" in your home directory.`, kind: 'bad' });
+  if (firstBranchNote) send({ t: 'notice', text: firstBranchNote, kind: /^Switched/.test(firstBranchNote) ? '' : 'bad' });
 
   function loadBindings() {
     tmux.run(`list-keys -T prefix -F ${quote('#{key_string}\t#{key_command}')}`, (err, lines) => {
@@ -418,7 +460,16 @@ function bridge(ws, { session, cols, rows, commit = '', onStop = () => {}, onRes
     );
   }
 
-  ws.on('message', (raw) => {
+  ws.on('message', onMessage);
+  ws.on('close', detach);
+  function detach() {
+    ws.off('message', onMessage);
+    ws.off('close', detach);
+    savedEvents.off('change', onSavedChange);
+    clearTimeout(refreshTimer);
+    tmux.close();
+  }
+  function onMessage(raw) {
     let msg;
     try {
       msg = JSON.parse(raw);
@@ -434,7 +485,11 @@ function bridge(ws, { session, cols, rows, commit = '', onStop = () => {}, onRes
       case 'size': {
         const c = Math.trunc(msg.cols);
         const r = Math.trunc(msg.rows);
-        if (c > 1 && r > 1 && c < 2000 && r < 1000) tmux.run(`refresh-client -C ${c}x${r}`);
+        if (c > 1 && r > 1 && c < 2000 && r < 1000) {
+          cols = c;
+          rows = r;
+          tmux.run(`refresh-client -C ${c}x${r}`);
+        }
         break;
       }
       case 'keys':
@@ -475,19 +530,63 @@ function bridge(ws, { session, cols, rows, commit = '', onStop = () => {}, onRes
       case 'reorder':
         if (Array.isArray(msg.ws) && msg.ws.length < 1000 && msg.ws.every(isWindowId)) reorder(msg.ws);
         break;
+      case 'disconnect':
+        if (isWindowId(msg.w)) disconnectWindow(msg.w);
+        break;
+      case 'info':
+        if (isWindowId(msg.w)) windowInfo(tmux, msg.w, (err, list) => !err && send({ t: 'info', w: msg.w, panes: list }));
+        break;
+      case 'forget':
+        if (typeof msg.id === 'string') takeSaved(session, msg.id);
+        break;
       case 'stop':
         onStop();
         break;
       case 'restart':
         onRestart();
         break;
+      case 'soft-restart':
+        onSoftRestart();
+        break;
     }
-  });
-  ws.on('close', () => {
-    savedEvents.off('change', onSavedChange);
-    clearTimeout(refreshTimer);
-    tmux.close();
-  });
+  }
+
+  // Save a window the way a stop would (name, directory, long id), then
+  // close it. Its tab turns dotted in place; tapping it reopens it.
+  // A coding agent in it is closed first, the way you would (see
+  // agent-close.js), so its resume command is saved with the window.
+  const closing = new Set();
+  function disconnectWindow(w) {
+    if (closing.has(w)) return;
+    const format = ['#{window_id}', `#{${ID_OPTION}}`, '#{automatic-rename}', '#{pane_current_path}', '#{window_name}'].join('\t');
+    tmux.run(`display -p -t ${w} ${quote(format)}`, async (err, lines) => {
+      if (err || !lines[0]) return;
+      const [id, uid, auto, dir, ...name] = lines[0].split('\t');
+      if (id !== w) return; // tmux fell back to another window: that one is not ours to close
+      closing.add(w);
+      const agents = await closeAgents(session, { target: w, log: (m) => console.log(`[${session}] ${m}`) });
+      closing.delete(w);
+      const agent = agents.find((a) => a.active) ?? agents[0];
+      const where = agent?.dir || dir;
+      addSaved(session, {
+        id: uid || newWindowId(),
+        name: name.join('\t'),
+        autoName: auto === '1',
+        dir: where,
+        branch: branchOf(where),
+        agent: agent?.command ? { name: agent.agent, command: agent.command } : null,
+      });
+      execFile(TMUX_BIN, tmuxArgs('kill-window', '-t', w), (e, _o, stderr) => {
+        if (e && !/can't find window/.test(stderr)) send({ t: 'notice', text: `Could not close the window: ${stderr.trim() || e.message}`, kind: 'bad' });
+      });
+    });
+  }
+
+  // Type an agent's resume command into a fresh pane's shell, as you would.
+  function typeAgent(pane, agent) {
+    if (!isPaneId(pane) || !agent?.command) return;
+    tmux.runList([`send-keys -t ${pane} -l ${quote(agent.command)}`, `send-keys -t ${pane} Enter`]);
+  }
 
   // Reopen a saved window: a new window with the saved name (unless tmux was
   // naming it after its program) in the saved directory, under the same id.
@@ -501,12 +600,20 @@ function bridge(ws, { session, cols, rows, commit = '', onStop = () => {}, onRes
       send({ t: 'notice', text: `${dir || 'The saved directory'} is gone; opened "${entry.name}" in your home directory.`, kind: 'bad' });
       dir = os.homedir();
     }
+    else {
+      const note = restoreBranch(dir, entry.branch, openDirs());
+      if (note) send({ t: 'notice', text: note, kind: /^Switched/.test(note) ? '' : 'bad' });
+    }
     const name = entry.autoName ? '' : ` -n ${quote(entry.name)}`;
     // One command list, so the id is on the window before anyone lists it.
     // runList, not run: tmux answers each command of a list separately.
-    tmux.runList([`new-window -c ${quote(dir)}${name}`, `set-option -w ${ID_OPTION} ${quote(entry.id)}`], ([made]) => {
-      if (made.err) send({ t: 'notice', text: `Could not reopen "${entry.name}": ${made.err.message}`, kind: 'bad' });
-    });
+    tmux.runList(
+      [`new-window -P -F "#{pane_id}" -c ${quote(dir)}${name}`, `set-option -w ${ID_OPTION} ${quote(entry.id)}`],
+      ([made]) => {
+        if (made.err) send({ t: 'notice', text: `Could not reopen "${entry.name}": ${made.err.message}`, kind: 'bad' });
+        else typeAgent(made.lines[0], entry.agent);
+      },
+    );
   }
 
   // Swap windows until tmux's index order matches the page's tab order, so
@@ -535,7 +642,11 @@ function bridge(ws, { session, cols, rows, commit = '', onStop = () => {}, onRes
     const next = (prev + data.toString('utf8')).slice(-4000);
     tails.set(paneId, next);
     const hint = findResumeHint(next);
-    if (!hint || journaled.has(hint.command)) return;
+    if (!hint) return;
+    // Used up: the next agent to leave in this pane must not be shadowed by
+    // this one, still sitting in the recent text.
+    tails.set(paneId, '');
+    if (journaled.has(hint.command)) return;
     journaled.add(hint.command);
     tmux.run(`display -p -t ${paneId} "#{pane_current_path}"`, (err, lines) => {
       const cwd = err ? '' : lines[0];

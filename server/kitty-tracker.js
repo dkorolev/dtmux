@@ -15,8 +15,9 @@ export function trackKitty(paneId, data) {
   if (!st && !text.includes('\x1b[')) return false;
   st ??= { cur: 0, stack: [], tail: '', cmd: undefined };
   panes.set(paneId, st);
-  const before = st.cur;
+  let seen = false;
   for (const m of text.matchAll(SEQ)) {
+    seen = true;
     const [a = '', b = ''] = m[2].split(';');
     if (m[1] === '>') {
       st.stack.push(st.cur);
@@ -34,8 +35,10 @@ export function trackKitty(paneId, data) {
   const esc = text.lastIndexOf('\x1b');
   st.tail =
     esc !== -1 && text.length - esc < 32 && /^\x1b(\[[<>=]?[0-9;]*)?$/.test(text.slice(esc)) ? text.slice(esc) : '';
-  if (st.cur !== before) st.cmd = undefined;
-  return st.cur !== before && st.cur !== 0;
+  // Any push / pop / set, even one that leaves the flags as they were, may
+  // come from a new program: note which one is running now.
+  if (seen) st.cmd = undefined;
+  return seen && st.cur !== 0;
 }
 
 export function recordKittyCommand(paneId, cmd) {
@@ -53,4 +56,19 @@ export function kittyRestoreSequence(paneId, currentCmd) {
 
 export function forgetPane(paneId) {
   panes.delete(paneId);
+}
+
+// Hand-over across a soft restart, when the tmux server and its panes live on
+// but this process does not: every pane's flags, as plain data.
+export function exportKitty() {
+  return [...panes].filter(([, st]) => st.cur !== 0).map(([id, st]) => ({ id, cur: st.cur, stack: st.stack, cmd: st.cmd ?? null }));
+}
+
+export function importKitty(list) {
+  if (!Array.isArray(list)) return;
+  for (const e of list) {
+    if (typeof e?.id !== 'string' || !/^%\d+$/.test(e.id) || !Number.isInteger(e.cur)) continue;
+    const stack = Array.isArray(e.stack) ? e.stack.filter(Number.isInteger).slice(-16) : [];
+    panes.set(e.id, { cur: e.cur, stack, tail: '', cmd: typeof e.cmd === 'string' ? e.cmd : undefined });
+  }
 }

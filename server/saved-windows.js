@@ -8,7 +8,9 @@
 //
 // ~/.dtmux/saved-windows.json:
 //   { "version": 1, "savedAt": ISO time,
-//     "sessions": { "<session>": [ { id, name, autoName, dir }, ... ] } }
+//     "sessions": { "<session>": [ { id, name, autoName, dir, branch?, agent? }, ... ] } }
+// `branch`: the git branch `dir` was on. `agent`: { name, command }, the coding
+// agent that ran there and the command that resumes it (see agent-close.js).
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -26,13 +28,22 @@ savedEvents.setMaxListeners(0);
 const isEntry = (e) =>
   e && typeof e.id === 'string' && e.id && typeof e.name === 'string' && typeof e.dir === 'string';
 
+// The fields kept for a saved window; anything else is dropped.
+function clean({ id, name, autoName, dir, branch, agent }) {
+  const e = { id, name, autoName: Boolean(autoName), dir };
+  if (typeof branch === 'string' && branch) e.branch = branch;
+  if (agent && typeof agent.name === 'string' && typeof agent.command === 'string' && agent.command)
+    e.agent = { name: agent.name, command: agent.command };
+  return e;
+}
+
 function load() {
   try {
     const data = JSON.parse(fs.readFileSync(SAVED_FILE, 'utf8'));
     const out = new Map();
     for (const [session, list] of Object.entries(data?.sessions ?? {})) {
       const good = Array.isArray(list) ? list.filter(isEntry) : [];
-      if (good.length) out.set(session, good.map(({ id, name, autoName, dir }) => ({ id, name, autoName: Boolean(autoName), dir })));
+      if (good.length) out.set(session, good.map(clean));
     }
     return out;
   } catch {
@@ -67,9 +78,19 @@ export function takeSaved(session, id) {
   return entry;
 }
 
+// Save one live window for later, as a page's Disconnect does: it becomes a
+// dotted tab, the same as if dtmux had stopped. Replaces an entry with its id.
+export function addSaved(session, entry) {
+  const list = (saved.get(session) ?? []).filter((e) => e.id !== entry.id);
+  list.push(clean(entry));
+  saved.set(session, list);
+  persist();
+  savedEvents.emit('change', session);
+}
+
 // Record the live windows at shutdown: per session, live windows in tab order
 // first, then the saved ones that were never reopened. `live` items are
-// { session, index, id, name, autoName, dir }.
+// { session, index, id, name, autoName, dir, branch?, agent? }.
 //
 // A live window that was not reopened from the list but looks the same as a
 // saved one (same name, directory and naming) stands in for it, one for one.
@@ -80,7 +101,7 @@ export function saveOnStop(live) {
   const next = new Map();
   for (const w of [...live].sort((a, b) => a.index - b.index)) {
     if (!next.has(w.session)) next.set(w.session, []);
-    next.get(w.session).push({ id: w.id || newWindowId(), name: w.name, autoName: w.autoName, dir: w.dir });
+    next.get(w.session).push(clean({ ...w, id: w.id || newWindowId() }));
   }
   for (const [session, list] of saved) {
     const liveHere = next.get(session) ?? [];

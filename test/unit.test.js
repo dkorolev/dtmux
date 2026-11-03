@@ -104,6 +104,30 @@ test('findResumeHint reads the leave-message of Claude, Codex, and Cursor', () =
   assert.equal(findResumeHint('just talking about claude --resume someday'), null);
 });
 
+test('findResumeHint knows every shape of Claude Code 2.1 resume command', () => {
+  const hint = (cmd) => findResumeHint(`\x1b[2m\nResume this session with:\n${cmd}\n\x1b[22m`)?.command;
+  for (const cmd of [
+    'claude --resume 41c82cc4-a5a6-4519-9b5b-b411b78cfbb9',
+    'claude --resume',
+    'claude --dangerously-skip-permissions --resume 41c82cc4',
+    'claude --worktree "feat-x" --resume 41c82cc4',
+    'claude -w "feat-x" -r 41c82cc4',
+    'FOO=1 claude --resume 41c82cc4',
+  ])
+    assert.equal(hint(cmd), cmd);
+  assert.equal(
+    findResumeHint('To resume this session: cursor-agent --resume=abc-123\n')?.command,
+    'cursor-agent --resume=abc-123',
+  );
+});
+
+test('findResumeHint waits for the end of a command cut off between chunks', () => {
+  assert.equal(findResumeHint('Resume this session with:\nclaude --res'), null);
+  assert.equal(findResumeHint('Resume this session with:\nclaude --resume 41c8'), null);
+  assert.equal(findResumeHint('To reconnect, run:\n  codex resume 01a1'), null);
+  assert.equal(findResumeHint('Resume this session with:\nclaude --resume 41c8\n')?.command, 'claude --resume 41c8');
+});
+
 test('macWordEdit is Option+Left and Option+Right, as a word move', () => {
   const ev = (key, extra = {}) => ({ key, code: key, ctrlKey: false, altKey: false, shiftKey: false, metaKey: false, ...extra });
   assert.equal(macWordEdit(ev('ArrowLeft', { altKey: true })), '\x1bb');
@@ -241,4 +265,129 @@ test('planSwaps puts tmux windows in tab order, using their existing indexes', (
     assert.deepEqual(got.slice(0, named.length), named);
     assert.deepEqual(got.slice(named.length), current.map((w) => w.id).filter((id) => !named.includes(id)));
   }
+});
+
+test('kitty tracker notes the new program when it pushes the flags already in force', () => {
+  const p = '%901';
+  forgetPane(p);
+  trackKitty(p, Buffer.from('\x1b[>1u'));
+  recordKittyCommand(p, 'zsh');
+  assert.equal(trackKitty(p, Buffer.from('\x1b[>1u')), true, 'same flags, possibly another program');
+  recordKittyCommand(p, 'claude');
+  assert.equal(kittyRestoreSequence(p, 'claude'), '\x1b[=1;1u');
+});
+
+test('kitty state survives a hand-over to the next daemon', async () => {
+  const { exportKitty, importKitty } = await import('../server/kitty-tracker.js');
+  const p = '%902';
+  forgetPane(p);
+  trackKitty(p, Buffer.from('\x1b[>3u'));
+  recordKittyCommand(p, 'claude');
+  const data = JSON.parse(JSON.stringify(exportKitty()));
+  forgetPane(p);
+  assert.equal(kittyRestoreSequence(p, 'claude'), '');
+  importKitty([...data, { id: 'bogus', cur: 1 }, { id: '%903', cur: 'x' }]);
+  assert.equal(kittyRestoreSequence(p, 'claude'), '\x1b[=3;1u');
+  assert.equal(kittyRestoreSequence(p, 'zsh'), '');
+  assert.equal(kittyRestoreSequence('%903', 'x'), '');
+});
+
+test('pane info: etime, agents, and the foreground of a pane terminal', async () => {
+  const { parseEtime, agentOf, parsePs, describePane } = await import('../server/pane-info.js');
+  assert.equal(parseEtime('02:19'), 139);
+  assert.equal(parseEtime('11:16:32'), 11 * 3600 + 16 * 60 + 32);
+  assert.equal(parseEtime('2-03:04:05'), ((2 * 24 + 3) * 60 + 4) * 60 + 5);
+  assert.equal(parseEtime('soon'), null);
+  assert.equal(agentOf('claude --dangerously-skip-permissions --resume cdb1a39d'), 'Claude Code');
+  assert.equal(agentOf('/Users/x/.local/share/claude/versions/2.1.317 --resume a'), 'Claude Code');
+  assert.equal(agentOf('node /opt/homebrew/bin/codex resume 01a1'), 'Codex');
+  assert.equal(agentOf('/Users/x/.local/share/cursor-agent/versions/2026.10/cursor-agent'), 'Cursor Agent');
+  assert.equal(agentOf('vim claude.md'), null);
+  assert.equal(agentOf('-zsh'), null);
+  // Real `ps` rows: one pane running Claude Code (with a helper in its group),
+  // one idle shell.
+  const rows = parsePs(
+    [
+      '78394 78394 78508    45:21 ttys001  -zsh',
+      '47890 78508 78508    01:44 ttys001  caffeinate -i -t 300',
+      '78508 78508 78508    45:19 ttys001  claude --dangerously-skip-permissions --resume cdb1a39d',
+      '78574 78508 78508    45:18 ttys001  /Applications/yab.app/Contents/MacOS/yab mcp',
+      '88603 88603 88603    42:28 ttys006  -zsh',
+    ].join('\n'),
+  );
+  const busy = describePane({ tty: '/dev/ttys001', shellPid: 78394, dir: '/tmp/x' }, rows);
+  assert.equal(busy.openSecs, 45 * 60 + 21);
+  assert.equal(busy.running.agent, 'Claude Code');
+  assert.equal(busy.running.secs, 45 * 60 + 19);
+  const idle = describePane({ tty: '/dev/ttys006', shellPid: 88603, dir: '/tmp' }, rows);
+  assert.equal(idle.running, null);
+  assert.equal(idle.openSecs, 42 * 60 + 28);
+  const cmd = describePane(
+    { tty: '/dev/ttys009', shellPid: 1 },
+    parsePs('1 1 7 10:00 ttys009 -zsh\n7 7 7 00:05 ttys009 npm test'),
+  );
+  assert.deepEqual(cmd.running, { what: 'npm test', secs: 5, agent: null });
+});
+
+test('resumeCommand keeps the session and the launch flags, yolo included', async () => {
+  const { resumeCommand, carryFlags } = await import('../server/agent-resume.js');
+  const C = 'Claude Code';
+  // Claude prints its own flags: nothing added twice.
+  assert.equal(
+    resumeCommand(C, 'claude --dangerously-skip-permissions', 'claude --dangerously-skip-permissions --resume 7e38'),
+    'claude --dangerously-skip-permissions --resume 7e38',
+  );
+  // ... or leaves some out when the line would be too wide.
+  assert.equal(
+    resumeCommand(C, 'claude --dangerously-skip-permissions --model opus', 'claude --resume 7e38'),
+    'claude --dangerously-skip-permissions --model opus --resume 7e38',
+  );
+  // No line printed: resume the session from the arguments, else continue.
+  assert.equal(
+    resumeCommand(C, 'claude --dangerously-skip-permissions --resume 7e38f76f', null),
+    'claude --dangerously-skip-permissions --resume 7e38f76f',
+  );
+  assert.equal(resumeCommand(C, 'claude --permission-mode plan', null), 'claude --permission-mode plan --continue');
+  // A prompt or other flags are not repeated.
+  assert.equal(resumeCommand(C, 'claude --print fix the bug', 'claude --resume 1'), 'claude --resume 1');
+  // Codex: flags go after `resume`; short spellings count as their long ones.
+  assert.equal(
+    resumeCommand('Codex', '/opt/homebrew/bin/codex --dangerously-bypass-approvals-and-sandbox -m gpt-5', 'codex resume 01a1'),
+    'codex resume --dangerously-bypass-approvals-and-sandbox -m gpt-5 01a1',
+  );
+  assert.equal(resumeCommand('Codex', 'codex --yolo', null), 'codex resume --yolo --last');
+  assert.equal(resumeCommand('Codex', 'codex resume 01a1 --search', null), 'codex resume --search 01a1');
+  // Cursor: --yolo is --force; not added twice under two names.
+  assert.equal(resumeCommand('Cursor Agent', 'cursor-agent --yolo -f', 'cursor-agent --resume=abc'), 'cursor-agent --yolo --resume=abc');
+  assert.equal(resumeCommand('Cursor Agent', 'agent --force', 'agent --resume=abc'), 'agent --force --resume=abc');
+  assert.equal(resumeCommand('Cursor Agent', 'cursor-agent --model=sonnet-4', null), 'cursor-agent --model sonnet-4 --continue');
+  assert.equal(resumeCommand('Gemini CLI', 'gemini', null), null);
+  // Values are quoted again for the shell.
+  assert.deepEqual(carryFlags(C, "claude --add-dir /tmp/it's"), [{ canonical: '--add-dir', words: ['--add-dir', "/tmp/it's"] }]);
+  assert.equal(resumeCommand(C, "claude --add-dir /tmp/it's", 'claude --resume 1'), `claude --add-dir '/tmp/it'\\''s' --resume 1`);
+});
+
+test('restoreBranch switches back only when nothing can be hurt', async () => {
+  const { restoreBranch, branchOf } = await import('../server/git-branch.js');
+  const { execFileSync } = await import('node:child_process');
+  const fs = await import('node:fs');
+  const os = await import('node:os');
+  const path = await import('node:path');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dtmux-branch-'));
+  const git = (...a) => execFileSync('git', ['-C', dir, '-c', 'user.email=t@t', '-c', 'user.name=t', ...a], { stdio: 'ignore' });
+  git('init', '-q', '-b', 'main');
+  git('commit', '-q', '--allow-empty', '-m', 'init');
+  git('branch', 'feature');
+  assert.equal(restoreBranch(dir, 'main'), null, 'already there');
+  assert.equal(restoreBranch(dir, null), null, 'no branch saved');
+  assert.match(restoreBranch(dir, 'feature', [path.join(dir, 'sub')]), /another window/);
+  assert.equal(branchOf(dir), 'main');
+  fs.writeFileSync(path.join(dir, 'dirty.txt'), 'x');
+  assert.match(restoreBranch(dir, 'feature'), /uncommitted changes/);
+  assert.equal(branchOf(dir), 'main');
+  fs.rmSync(path.join(dir, 'dirty.txt'));
+  assert.match(restoreBranch(dir, 'feature'), /^Switched/);
+  assert.equal(branchOf(dir), 'feature');
+  assert.match(restoreBranch(dir, 'gone'), /Could not switch/);
+  fs.rmSync(dir, { recursive: true });
 });

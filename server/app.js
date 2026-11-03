@@ -5,6 +5,7 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
 import { attachTmuxSession } from './tmux-session.js';
@@ -39,6 +40,26 @@ function readCommit() {
   }
 }
 
+// A fingerprint of the files the page runs (public/), read now. A page that
+// was loaded from other files reloads itself when it (re)connects, so a soft
+// restart, or any reconnect, brings the browser side up to date as well.
+function readBuild() {
+  const hash = createHash('sha1');
+  const walk = (dir) => {
+    for (const ent of fs.readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      const file = path.join(dir, ent.name);
+      if (ent.isDirectory()) walk(file);
+      else if (ent.isFile()) hash.update(path.relative(PUBLIC, file)).update('\0').update(fs.readFileSync(file));
+    }
+  };
+  try {
+    walk(PUBLIC);
+  } catch {
+    return '';
+  }
+  return hash.digest('hex').slice(0, 12);
+}
+
 const TYPES = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript',
@@ -66,8 +87,8 @@ function resolveStatic(pathname) {
 
 // Resolves with the listening server once it is bound to `port`.
 // `onStop` runs when a page asks the daemon to stop, `onRestart` when it asks
-// for a restart (the Restart button).
-export function startServer({ port, onStop = () => {}, onRestart = () => {} }) {
+// for a full restart, `onSoftRestart` for a soft one (tmux keeps running).
+export function startServer({ port, onStop = () => {}, onRestart = () => {}, onSoftRestart = () => {} }) {
   const server = http.createServer((req, res) => {
     const pathname = new URL(req.url, `http://${req.headers.host}`).pathname;
     if (pathname === HEALTH_PATH) {
@@ -90,7 +111,10 @@ export function startServer({ port, onStop = () => {}, onRestart = () => {} }) {
       const type = TYPES[path.extname(file)] ?? 'application/octet-stream';
       if (path.basename(file) === 'index.html') {
         data = Buffer.from(
-          String(data).replaceAll('__XTERMJS_COMMIT__', readCommit()).replaceAll('__DTMUX_START_CMD__', START_CMD),
+          String(data)
+            .replaceAll('__XTERMJS_COMMIT__', readCommit())
+            .replaceAll('__DTMUX_BUILD__', readBuild())
+            .replaceAll('__DTMUX_START_CMD__', START_CMD),
         );
       }
       // no-store: a refresh must run the files just read, not a module the
@@ -120,7 +144,7 @@ export function startServer({ port, onStop = () => {}, onRestart = () => {} }) {
       ws.close(1008, 'bad session name');
       return;
     }
-    attachTmuxSession(ws, { session, cols, rows, commit: readCommit(), onStop, onRestart });
+    attachTmuxSession(ws, { session, cols, rows, commit: readCommit(), build: readBuild(), onStop, onRestart, onSoftRestart });
   });
 
   return new Promise((resolve, reject) => {
