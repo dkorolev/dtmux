@@ -181,3 +181,14 @@ export function orderTabs(order, items, cap = 500) {
   }
   return { tabs: [...known, ...fresh], order: next };
 }
+
+// `order` (tab keys) with the live windows' keys put in tmux's index order,
+// in the slots they already had; dotted tabs' keys stay where they are.
+// Windows not in `order` are left for orderTabs to add at the end.
+export function followTmuxOrder(order, windows) {
+  const keyOf = (w) => w.uid || w.id;
+  const live = new Set(windows.map(keyOf));
+  const tmuxOrder = [...windows].sort((a, b) => a.index - b.index).map(keyOf).filter((k) => order.includes(k));
+  let i = 0;
+  return order.map((k) => (live.has(k) ? tmuxOrder[i++] : k));
+}

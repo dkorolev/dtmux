@@ -24,6 +24,8 @@ const PUBLIC = path.join(ROOT, 'public');
 export const HOST = '127.0.0.1';
 export const DEFAULT_SESSION = process.env.DTMUX_SESSION || 'dtmux';
 export const HEALTH_PATH = '/dtmux/health';
+// Close code for a page whose session another page took (see tmux-mode.js).
+export const TAKEN_CODE = 4001;
 
 // First seven hex digits of HEAD, plus "-dirty" when the worktree has
 // uncommitted changes. Read per page and per connection so a refresh shows
@@ -125,6 +127,7 @@ export function startServer({ port, onStop = () => {}, onRestart = () => {}, onS
   });
 
   const wss = new WebSocketServer({ server, path: '/ws' });
+  const owners = new Map(); // session -> the page's socket that has it
   wss.on('connection', (ws, req) => {
     // Same-origin only: refuse handshakes coming from other sites.
     const origin = req.headers.origin;
@@ -144,6 +147,20 @@ export function startServer({ port, onStop = () => {}, onRestart = () => {}, onS
       ws.close(1008, 'bad session name');
       return;
     }
+    // One page per session: the newest takes it, the one before steps aside
+    // (it shows a button that takes the session back). Two pages at once
+    // would each keep their own tab order and push it into tmux in turn.
+    const before = owners.get(session);
+    if (before && before.readyState <= 1) {
+      try {
+        before.send(JSON.stringify({ t: 'taken' }));
+      } catch {}
+      before.close(TAKEN_CODE, 'open in another page');
+    }
+    owners.set(session, ws);
+    ws.on('close', () => {
+      if (owners.get(session) === ws) owners.delete(session);
+    });
     attachTmuxSession(ws, { session, cols, rows, commit: readCommit(), build: readBuild(), onStop, onRestart, onSoftRestart });
   });
 

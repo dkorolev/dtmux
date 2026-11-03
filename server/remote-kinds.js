@@ -12,6 +12,8 @@
 //                                 { gone: why }                  made, gone since
 //   create(remote, host, say)  -> { host, address, upSince }
 //   remove(remote, host)       delete it for good
+//   namedByCreate              the host's name comes from create (else it is
+//                              chosen first, and recorded before create)
 //   keepAlive                  touch a file now and then while connected
 //                              (machines that are deleted when idle)
 //
@@ -46,7 +48,9 @@ export function runCtl(remote, args, { json = false, stdin = null, log = null } 
   const all = [...(viaSsh ? mux('30m') : []), ...pre, ...(json ? ['--json'] : []), ...words];
   const what = `${remote.controller.join(' ')} ${args[0]}`;
   return new Promise((resolve, reject) => {
-    const child = spawn(cmd, all, { stdio: ['pipe', 'pipe', 'pipe'] });
+    // Its own process group: a tab closing mid-call (SIGHUP to the tab's
+    // processes) does not cut off a create whose result must be recorded.
+    const child = spawn(cmd, all, { stdio: ['pipe', 'pipe', 'pipe'], detached: true });
     let out = '';
     let err = '';
     child.stdout.on('data', (d) => (out += d));
@@ -158,6 +162,7 @@ const lunanode = {
   lifetime: (r) => `deleted ${hours(r.ttlSeconds)} after it is made`,
   newHost: (r) => `${r.hostPrefix}-${hex()}`,
   user: (r) => r.user,
+  namedByCreate: false,
   keepAlive: false,
 
   async lookup(remote, host, say) {
@@ -213,6 +218,7 @@ const devbox = {
   lifetime: () => 'deleted after 24 idle hours',
   newHost: () => `new-${hex()}`,
   user: (r, host) => host,
+  namedByCreate: true,
   keepAlive: true,
 
   async lookup(remote, host) {

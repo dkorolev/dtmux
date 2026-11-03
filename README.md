@@ -85,15 +85,23 @@ remotes:
   devbox accounts are deleted after 24 hours with no change in their home,
   so a connected tab touches `~/.dtmux-alive` there every 30 minutes. A tab
   whose machine is gone says so and offers to make a new one.
-- **Closing for good.** Right-click a tab: **Close** ends it with no dotted
-  tab (it works on a stuck tab, from outside); **Delete the VM / account…**
-  asks, then deletes the machine and closes the tab. Dotted remote tabs have
-  Delete too.
+- **Closing for good deletes the machine.** Right-click a tab:
+  **Disconnect** keeps the machine and leaves a dotted tab that joins it
+  again; **Close and delete the VM / account…** (on a dotted tab: **Forget
+  and delete…**) asks, then deletes the machine and the tab. It works on a
+  stuck tab too, from outside.
+- **No machine is left behind.** Every machine dtmux makes is recorded in
+  `~/.dtmux/machines.json` the moment its name is known (a tab closed while
+  its machine is still being made records it all the same). Every 2 minutes
+  the daemon deletes recorded machines that no tab, live or dotted, stands
+  for in two checks in a row: tabs that went without Close (tmux's own
+  kill-window, a crashed helper) take their machine with them too. Machines
+  dtmux did not make are never touched.
 - **When the session there ends** (its last shell exits, or its tmux is
-  detached), the tab stays, since the machine still runs: it shows
-  **Reconnect**, **Delete the VM… / account…** and **Close tab** (the
-  terminal takes Enter, `d` and Ctrl+C for the same). The page hears of it
-  at once through a tmux format subscription on the window option
+  detached), or the connection is down and you press Ctrl+C, the tab stays,
+  since the machine still runs: it shows **Reconnect** and **Close and
+  delete…** (the terminal takes Enter and `d` for the same). The page hears
+  of it at once through a tmux format subscription on the window option
   `@dtmux_remote_state`.
 - **Uptime.** A tab's tooltip counts from when its machine was ready, not
   from when the tab opened.
@@ -141,6 +149,14 @@ remotes:
 A popup about a tab (the resume command an agent printed as it left, the
 branch a reopened tab was put back on) shows on that tab only, and goes
 away when you switch tabs. Popups about dtmux itself show whatever the tab.
+
+## One page per session
+
+A session is shown in one page at a time. Opening it in another browser (or
+another tab) takes it over: the older page drops its tabs and terminals and
+shows **Switch to this page**, which takes the session back. So the tab
+order, which each browser remembers on its own, never has two pages
+disagreeing about it.
 
 ## Text selection
 

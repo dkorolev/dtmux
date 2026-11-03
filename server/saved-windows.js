@@ -67,6 +67,9 @@ function persist() {
   fs.renameSync(tmp, SAVED_FILE);
 }
 
+// Every saved window of every session.
+export const allSaved = () => [...saved.values()].flat().map((e) => ({ ...e }));
+
 export function savedFor(session) {
   return (saved.get(session) ?? []).map((e) => ({ ...e }));
 }

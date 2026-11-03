@@ -8,7 +8,7 @@
 // tmux prefix key is the exception: prefix sequences go through tmux's own
 // key bindings, so splits, new windows and the rest keep working.
 import { createTerminal, leaveQueriesToTmux, base64ToBytes, socketUrl } from './terminal-common.js';
-import { orderTabs, parseLayout, paneBorders, tmuxKeyName, windowSwitchDirection } from './tmux-util.js';
+import { followTmuxOrder, orderTabs, parseLayout, paneBorders, tmuxKeyName, windowSwitchDirection } from './tmux-util.js';
 
 export function startTmuxMode({ container, toolbar, params }) {
   const stage = document.createElement('div');
@@ -21,6 +21,8 @@ export function startTmuxMode({ container, toolbar, params }) {
   let grid = gridSize();
   let ws = null;
   let ended = false; // the server said goodbye; the socket closing is expected
+  let taken = false; // a newer page has the session (see showTaken)
+  const TAKEN_CODE = 4001; // keep in sync with server/app.js
   let sessionName = params.get('session') || 'dtmux';
   let activeWindow = null;
   // Toolbar tabs. Live windows, and windows saved when dtmux last stopped
@@ -69,7 +71,8 @@ export function startTmuxMode({ container, toolbar, params }) {
       toolbar.setStatus('connected', 'ok');
     };
     ws.onclose = (ev) => {
-      if (!ended) retryConnect(ev.reason);
+      if (ev.code === TAKEN_CODE) showTaken();
+      else if (!ended) retryConnect(ev.reason);
     };
     ws.onerror = () => {
       if (!retry) toolbar.setStatus('error', 'bad');
@@ -122,6 +125,9 @@ export function startTmuxMode({ container, toolbar, params }) {
         case 'saved':
           savedWindows = Array.isArray(msg.windows) ? msg.windows : [];
           renderTabs();
+          break;
+        case 'taken':
+          showTaken();
           break;
         case 'exit':
           ended = true;
@@ -233,6 +239,42 @@ export function startTmuxMode({ container, toolbar, params }) {
     btn.addEventListener('click', () => {
       btn.disabled = true;
       send({ t: 'new-session' });
+    });
+    box.append(p, btn);
+    stage.append(box);
+    btn.focus();
+  }
+
+  // A newer page (another browser, or another tab of this one) took the
+  // session. This page lets go of everything, tabs included, so the two can
+  // never disagree about them, and offers to take the session back.
+  function showTaken() {
+    if (taken) return;
+    taken = true;
+    ended = true;
+    clearTimeout(retry?.timer);
+    clearTimeout(retry?.overlayTimer);
+    retry = null;
+    resetView();
+    for (const el of tabEls.values()) el.remove();
+    tabEls.clear();
+    tabItems = new Map();
+    savedWindows = [];
+    pending.clear();
+    newWindowButton.disabled = true;
+    restartButton.disabled = true;
+    toolbar.setStatus('open elsewhere', 'bad');
+    const box = document.createElement('div');
+    box.className = 'tmux-overlay taken';
+    const p = document.createElement('p');
+    p.textContent = `Session "${sessionName ?? params.get('session') ?? 'dtmux'}" is open in another page or browser.`;
+    const btn = document.createElement('button');
+    btn.textContent = 'Switch to this page';
+    btn.addEventListener('click', () => {
+      box.remove();
+      taken = false;
+      toolbar.setStatus('connecting…');
+      connect();
     });
     box.append(p, btn);
     stage.append(box);
@@ -469,6 +511,16 @@ export function startTmuxMode({ container, toolbar, params }) {
     const win = windows.find((w) => w.active);
     const pane = win && list.find((p) => p.window === win.id && p.active);
     for (const info of list) panes.get(info.id)?.el.classList.toggle('active', info.active);
+    // The first state after (re)connecting: tmux's window order is the one
+    // the last page left, maybe in another browser; live tabs take it, dotted
+    // tabs keep their places in this browser's order.
+    if (!haveState) {
+      const next = followTmuxOrder(tabOrder, windows);
+      if (next.join() !== tabOrder.join()) {
+        tabOrder = next;
+        saveOrder();
+      }
+    }
     liveWindows = windows;
     haveState = true;
     stage.classList.remove('stale');
@@ -510,11 +562,10 @@ export function startTmuxMode({ container, toolbar, params }) {
       row.append(b);
     };
     button('Reconnect', 'primary', () => send({ t: 'in', p: pane.id, d: '\r' }));
-    button(`Delete the ${r.noun}…`, 'danger', () => {
+    button(`Close and delete the ${r.noun}…`, 'danger', () => {
       if (confirm(`Delete ${r.label} ${r.noun} ${w.remote.host} for good?\n\nEverything on it is lost, and this tab closes.`))
-        send({ t: 'in', p: pane.id, d: 'd' });
+        send({ t: 'close', w: w.id });
     });
-    button('Close tab', '', () => send({ t: 'close', w: w.id }));
     box.append(title, info, row);
     winEl.append(box);
   }
@@ -916,18 +967,16 @@ export function startTmuxMode({ container, toolbar, params }) {
                 renderTabs();
               },
             ],
-            [
-              'Close',
-              t.w.remote
-                ? `Close this tab for good, even if it is stuck; the ${remoteOf(t.w).noun} keeps running (${remoteOf(t.w).lifetime})`
-                : 'Close this window for good, ending what runs in it; no dotted tab is kept',
-              () => {
-                const what = t.w.remote ? 'tab' : 'window, and everything running in it';
-                if (t.w.remote || confirm(`Close "${t.w.name}" for good?\n\nThe ${what} ends; no dotted tab is kept.`))
-                  send({ t: 'close', w: t.w.id });
-              },
-            ],
-            ...deleteItem(t),
+            t.w.remote
+              ? closeRemoteItem(t, 'Close')
+              : [
+                  'Close',
+                  'Close this window for good, ending what runs in it; no dotted tab is kept',
+                  () => {
+                    if (confirm(`Close "${t.w.name}" for good?\n\nThe window, and everything running in it, ends; no dotted tab is kept.`))
+                      send({ t: 'close', w: t.w.id });
+                  },
+                ],
           ]
         : [
             [
@@ -935,29 +984,26 @@ export function startTmuxMode({ container, toolbar, params }) {
               t.w.remote ? `Join ${t.w.remote.host} again` : `Start it again in ${t.w.dir}`,
               () => tabEls.get(key)?.click(),
             ],
-            ['Forget', 'Remove this dotted tab for good', () => send({ t: 'forget', id: key })],
-            ...deleteItem(t),
+            t.w.remote ? closeRemoteItem(t, 'Forget') : ['Forget', 'Remove this dotted tab for good', () => send({ t: 'forget', id: key })],
           ],
       x,
       y,
     );
   }
 
-  // For a remote tab: delete its machine for good (asks first), and the tab.
-  function deleteItem(t) {
-    if (!t.w.remote) return [];
+  // A remote tab closed for good (Close on a live one, Forget on a dotted
+  // one) takes its machine with it, after asking; Disconnect keeps it.
+  function closeRemoteItem(t, verb) {
     const r = remoteOf(t.w);
     const what = `${r.label} ${r.noun} ${t.w.remote.host}`;
     return [
-      [
-        `Delete the ${r.noun}…`,
-        `Delete ${what} and close this tab`,
-        () => {
-          if (!confirm(`Delete ${what} for good?\n\nEverything on it is lost, and this tab closes.`)) return;
-          send(t.kind === 'live' ? { t: 'delete-remote', w: t.w.id } : { t: 'delete-remote', id: t.key });
-        },
-        '#ff6b6b',
-      ],
+      `${verb} and delete the ${r.noun}…`,
+      `Delete ${what} and remove this tab for good (Disconnect keeps the ${r.noun})`,
+      () => {
+        if (confirm(`Delete ${what} for good?\n\nEverything on it is lost, and this tab goes away. (Disconnect keeps the ${r.noun}.)`))
+          send(t.kind === 'live' ? { t: 'close', w: t.w.id } : { t: 'forget', id: t.key });
+      },
+      '#ff6b6b',
     ];
   }
 

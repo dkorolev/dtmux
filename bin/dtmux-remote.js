@@ -23,6 +23,7 @@ import { loadConfig } from '../server/config.js';
 import { STATE_DIR } from '../server/paths.js';
 import { shellQuote } from '../server/agent-resume.js';
 import { kindOf, mux, MUX_DIR, transient } from '../server/remote-kinds.js';
+import { recordMachine, dropMachine } from '../server/machine-ledger.js';
 
 const [name, firstHost, ...flags] = process.argv.slice(2);
 const flag = (f) => (flags.includes(f) ? flags[flags.indexOf(f) + 1] ?? null : null);
@@ -36,6 +37,14 @@ let host = firstHost;
 let remote;
 let kind;
 let mayCreate = flags.includes('--new');
+let making = false;
+let hungUp = false;
+// The tab is gone: its terminal is too, so writes to it are dropped.
+process.on('SIGHUP', () => {
+  hungUp = true;
+  if (!making) process.exit(129);
+});
+process.stdout.on('error', () => {});
 
 async function main() {
   if (!name || !host) throw new Error('usage: dtmux-remote.js <remote> <host> [--new | --addr <address> [--up <secs>]]');
@@ -89,13 +98,25 @@ async function settle() {
   return make();
 }
 
+// Recorded in the ledger (machine-ledger.js) as soon as its name is known,
+// so the daemon deletes it should this tab go without deleting it. A tab
+// closing meanwhile (SIGHUP) does not stop this: the machine is still
+// recorded, then the helper exits.
 async function make() {
-  const m = await kind.create(remote, host, say);
-  if (m.host !== host) {
-    host = m.host;
-    adopt(host);
+  making = true;
+  try {
+    if (!kind.namedByCreate) recordMachine(name, host);
+    const m = await kind.create(remote, host, say);
+    recordMachine(name, m.host);
+    if (m.host !== host) {
+      host = m.host;
+      adopt(host);
+    }
+    return m;
+  } finally {
+    making = false;
+    if (hungUp) process.exit(129);
   }
-  return m;
 }
 
 // This tab now stands for another machine: tell dtmux (the window option it
@@ -160,7 +181,7 @@ async function connect(address, fresh, { probe = false } = {}) {
       if (code !== 255) {
         // The session there ended (its last shell exited, or it was detached).
         // The tab stays, so the machine is not forgotten while it still runs.
-        const next = await ended();
+        const next = await ended(`The session on ${remote.label} ${kind.noun} ${host} has ended`);
         if (next === 'reconnect') {
           tries = 0;
           continue;
@@ -184,28 +205,40 @@ async function connect(address, fresh, { probe = false } = {}) {
           return finish();
         }
       }
-      warn('The connection dropped; connecting again in 5s (Ctrl+C closes this tab)…');
-      await sleep(5000);
+      warn('The connection dropped; connecting again in 5s (Ctrl+C: other choices)…');
+      if (await interruptibleSleep(5000)) {
+        const next = await ended(`Not connected to ${remote.label} ${kind.noun} ${host}`);
+        if (next === 'reconnect') {
+          tries = 0;
+          continue;
+        }
+        return;
+      }
     }
   } finally {
     clearInterval(keepAlive);
   }
 }
 
-// The session on the machine has ended: reconnect (Enter), delete the
-// machine (d), or close the tab and leave the machine running (Ctrl+C). The
+// The session on the machine has ended, or the connection is down and you
+// pressed Ctrl+C: reconnect (Enter) or delete the machine and close the tab
+// (d). There is no closing the tab while keeping the machine here: that is
+// the tab menu's Disconnect, which keeps a dotted tab to join it again. The
 // page shows the same choices as buttons on the tab (see the window option).
-async function ended() {
+async function ended(why) {
   tmux('set-option', '-w', '@dtmux_remote_state', 'ended');
   try {
     for (;;) {
-      say(`The session on ${remote.label} ${kind.noun} ${host} has ended; the ${kind.noun} is still there (${kind.lifetime(remote)}).`);
-      const key = await askKey(`Enter: reconnect · d: delete the ${kind.noun} · Ctrl+C: close this tab and leave the ${kind.noun} running`, ['\r', '\n', 'd', 'D', '\x03', '\x04']);
+      say(`${why}; the ${kind.noun} is still there (${kind.lifetime(remote)}).`);
+      const key = await askKey(`Enter: reconnect · d: delete the ${kind.noun} and close this tab · (to keep it and close the tab: Disconnect in the tab menu)`, ['\r', '\n', 'd', 'D']);
+      if (key === null) return 'close';
       if (key === '\r' || key === '\n') return 'reconnect';
-      if (key === '\x03' || key === '\x04') return 'close';
       say(`Deleting ${host}…`);
       try {
         await kind.remove(remote, host);
+        try {
+          dropMachine(name, host);
+        } catch {} // the daemon's sweep drops it once it sees the machine gone
         say(`Deleted ${remote.label} ${kind.noun} ${host}.`);
         await sleep(1500);
         return 'deleted';
@@ -218,11 +251,36 @@ async function ended() {
   }
 }
 
-// Wait for one of `keys`; resolves to it.
+// Sleep, cut short by Ctrl+C: resolves true when it was.
+function interruptibleSleep(ms) {
+  return new Promise((resolve) => {
+    const done = (hit) => {
+      clearTimeout(timer);
+      process.off('SIGINT', onInt);
+      if (process.stdin.isTTY) {
+        process.stdin.off('data', onData);
+        process.stdin.setRawMode(false);
+        process.stdin.pause();
+      }
+      resolve(hit);
+    };
+    const onInt = () => done(true);
+    const onData = (d) => d.includes(3) && done(true);
+    const timer = setTimeout(() => done(false), ms);
+    process.on('SIGINT', onInt);
+    if (process.stdin.isTTY) {
+      process.stdin.setRawMode(true);
+      process.stdin.resume();
+      process.stdin.on('data', onData);
+    }
+  });
+}
+
+// Wait for one of `keys`; resolves to it (null with no terminal to ask).
 function askKey(text, keys) {
   say(text);
   return new Promise((resolve) => {
-    if (!process.stdin.isTTY) return resolve(keys[keys.length - 1]);
+    if (!process.stdin.isTTY) return resolve(null); // nobody to ask
     process.stdin.setRawMode(true);
     process.stdin.resume();
     process.stdin.on('data', function on(d) {

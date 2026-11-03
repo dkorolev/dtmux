@@ -21,6 +21,8 @@
 //                                         a resume command showed up on a pane
 //   saved  { windows: [{ id, name, dir, branch, agent, remote }] }
 //                                         windows saved when dtmux last stopped
+//   taken  {}                             a newer page took this session; this
+//                                         socket closes (code 4001) right after
 //   idle   { session, build, remotes }    the session does not exist but saved
 //                                         windows do: nothing is started until
 //                                         the page sends resume or new-session
@@ -38,10 +40,10 @@
 //                          info { w, panes: [{ id, active, dir, openSecs, running }], upSince }
 //                          (upSince: unix seconds a remote tab's VM has been up)
 //   disconnect { w }       save a window for later and close it: it turns dotted
-//   close { w }            close a window for good, no dotted tab (works on a stuck one)
-//   forget { id }          drop a saved window for good
-//   delete-remote { w } | { id }  delete a remote tab's machine (live window or
-//                          saved tab) and close the tab
+//   close { w }            close a window for good, no dotted tab (works on a stuck one);
+//                          a remote tab's machine is deleted with it
+//   forget { id }          drop a saved window for good; a remote one's machine too
+//   delete-remote { w } | { id }  the same as close / forget (older pages)
 //   new-session            while idle: start the session empty
 //   stop                   stop the whole daemon
 //   restart                stop the daemon and start it again: windows saved, tmux ended
@@ -62,6 +64,7 @@ import { savedFor, takeSaved, addSaved, savedEvents, newWindowId, ID_OPTION } fr
 import { REMOTE_OPTION, REMOTE_UP_OPTION, REMOTE_FORMAT, REMOTE_SUBSCRIPTION, parseRemote, remoteValue, currentRemotes, newHost, remoteCommand } from './remotes.js';
 import { pageRemotes } from './remote-config.js';
 import { kindOf } from './remote-kinds.js';
+import { dropMachine } from './machine-ledger.js';
 
 const HISTORY_LINES = 10000; // keep in sync with the browser's scrollback
 const SEND_CHUNK = 256; // bytes per send-keys command
@@ -144,7 +147,12 @@ function deleteMachine(where, send) {
   const kind = kindOf(remote);
   send({ t: 'notice', text: `Deleting ${remote.label} ${kind.noun} ${where.host}…` });
   kind.remove(remote, where.host).then(
-    () => send({ t: 'notice', text: `Deleted ${remote.label} ${kind.noun} ${where.host}.` }),
+    () => {
+      try {
+        dropMachine(where.name, where.host);
+      } catch {} // the sweep drops it once it sees the machine gone
+      send({ t: 'notice', text: `Deleted ${remote.label} ${kind.noun} ${where.host}.` });
+    },
     (err) => send({ t: 'notice', text: `Could not delete ${where.host}: ${err.message}`, kind: 'bad' }),
   );
 }
@@ -225,14 +233,8 @@ export function attachTmuxSession(ws, opts) {
       else if (msg.t === 'resume' && typeof msg.id === 'string') {
         const entry = takeSaved(session, msg.id);
         if (entry) start(entry);
-      } else if (msg.t === 'forget' && typeof msg.id === 'string') takeSaved(session, msg.id);
-      else if (msg.t === 'delete-remote' && typeof msg.id === 'string') {
-        const entry = savedFor(session).find((e) => e.id === msg.id);
-        if (entry?.remote) {
-          takeSaved(session, msg.id);
-          deleteMachine(entry.remote, send);
-        }
-      } else if (msg.t === 'stop') onStop();
+      } else if ((msg.t === 'forget' || msg.t === 'delete-remote') && typeof msg.id === 'string') forgetSaved(msg.id);
+      else if (msg.t === 'stop') onStop();
       else if (msg.t === 'restart') onRestart();
       else if (msg.t === 'soft-restart') onSoftRestart();
     }
@@ -608,20 +610,12 @@ function bridge(ws, opts) {
           );
         break;
       case 'forget':
-        if (typeof msg.id === 'string') takeSaved(session, msg.id);
+      case 'delete-remote':
+        if (isWindowId(msg.w)) closeWindow(msg.w);
+        else if (typeof msg.id === 'string') forgetSaved(msg.id);
         break;
       case 'close':
         if (isWindowId(msg.w)) closeWindow(msg.w);
-        break;
-      case 'delete-remote':
-        if (isWindowId(msg.w)) closeWindow(msg.w, { deleteMachine: true });
-        else if (typeof msg.id === 'string') {
-          const entry = savedFor(session).find((e) => e.id === msg.id);
-          if (entry?.remote) {
-            takeSaved(session, msg.id);
-            deleteMachine(entry.remote, send);
-          }
-        }
         break;
       case 'stop':
         onStop();
@@ -669,10 +663,17 @@ function bridge(ws, opts) {
     });
   }
 
+  // Drop a saved (dotted) tab for good; a remote one's machine goes with it.
+  function forgetSaved(id) {
+    const entry = takeSaved(session, id);
+    if (entry?.remote) deleteMachine(entry.remote, send);
+  }
+
   // Close a window for good: no dotted tab. From outside the window, so a
-  // stuck one (a frozen ssh, say) closes too. `deleteMachine`: also delete
-  // the remote machine the window was on.
-  function closeWindow(w, { deleteMachine: alsoDelete = false } = {}) {
+  // stuck one (a frozen ssh, say) closes too. A remote tab closed for good
+  // takes its machine with it (Disconnect is the way to keep the machine):
+  // nothing would ever join it again, and it would run on, maybe at a cost.
+  function closeWindow(w) {
     tmux.run(`display -p -t ${w} ${quote(`#{window_id}\t${REMOTE_FORMAT}`)}`, (err, lines) => {
       if (err || !lines[0]) return;
       const [id, remoteVal] = lines[0].split('\t');
@@ -681,7 +682,7 @@ function bridge(ws, opts) {
       execFile(TMUX_BIN, tmuxArgs('kill-window', '-t', w), (e, _o, stderr) => {
         if (e && !/can't find window/.test(stderr)) send({ t: 'notice', text: `Could not close the window: ${stderr.trim() || e.message}`, kind: 'bad' });
       });
-      if (alsoDelete && where) deleteMachine(where, send);
+      if (where) deleteMachine(where, send);
     });
   }
 

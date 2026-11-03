@@ -23,6 +23,7 @@ import { exportKitty, importKitty } from './kitty-tracker.js';
 import { saveOnStop } from './saved-windows.js';
 import { closeAgents } from './agent-close.js';
 import { LIVE_FORMAT, parseLive, writeSnapshot, readSnapshot, dropSnapshot } from './live-snapshot.js';
+import { sweepMachines, SWEEP_MS } from './machine-sweep.js';
 
 const port = Number(process.argv[2]);
 const restarted = process.argv[3] === '--restarted';
@@ -239,6 +240,19 @@ setInterval(async () => {
   }
   snapshotBusy = false;
 }, SNAPSHOT_MS).unref();
+
+// Delete remote machines no tab stands for any more (see machine-sweep.js).
+let sweepBusy = false;
+setInterval(async () => {
+  if (stopping || sweepBusy) return;
+  sweepBusy = true;
+  try {
+    await sweepMachines(log);
+  } catch (e) {
+    log(`machine sweep: ${e.message}`);
+  }
+  sweepBusy = false;
+}, SWEEP_MS).unref();
 
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
