@@ -40,15 +40,16 @@ export function quote(s) {
 
 export class TmuxControl extends EventEmitter {
   // Attach to `session`, creating it at cols x rows if it does not exist, its
-  // first window in `cwd` and, when given, named `windowName`.
-  constructor({ session, cols, rows, cwd, windowName }) {
+  // first window in `cwd` and, when given, named `windowName` and running
+  // `command` (a shell command) instead of a shell.
+  constructor({ session, cols, rows, cwd, windowName, command }) {
     super();
     const env = { ...process.env, TERM: 'xterm-256color' };
     delete env.TMUX; // we may ourselves be running inside tmux
     delete env.TMUX_PANE;
     this.proc = spawn(
       TMUX_BIN,
-      tmuxArgs('-C', 'new-session', '-A', '-s', session, '-x', String(cols), '-y', String(rows), '-c', cwd, ...(windowName ? ['-n', windowName] : [])),
+      tmuxArgs('-C', 'new-session', '-A', '-s', session, '-x', String(cols), '-y', String(rows), '-c', cwd, ...(windowName ? ['-n', windowName] : []), ...(command ? [command] : [])),
       { env, stdio: ['pipe', 'pipe', 'pipe'] },
     );
     this._buf = Buffer.alloc(0);

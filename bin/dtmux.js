@@ -11,6 +11,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { stringify } from 'yaml';
 import { loadConfig, ConfigError, CONFIG_PATH } from '../server/config.js';
 import { PID_FILE, LOG_FILE, STATE_DIR } from '../server/paths.js';
 
@@ -208,7 +209,7 @@ async function status() {
 function showConfig() {
   const cfg = config();
   console.log(`# ${CONFIG_PATH}${fs.existsSync(CONFIG_PATH) ? '' : ' (missing; defaults)'}`);
-  for (const [k, v] of Object.entries(cfg)) console.log(`${k}: ${v}`);
+  process.stdout.write(stringify(cfg));
 }
 
 const USAGE = `usage: dtmux [start | restart [--full] | kill | stop | status | config]

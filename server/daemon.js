@@ -19,6 +19,7 @@ import { exportKitty, importKitty } from './kitty-tracker.js';
 import { saveOnStop, ID_OPTION } from './saved-windows.js';
 import { closeAgents } from './agent-close.js';
 import { branchOf } from './git-branch.js';
+import { REMOTE_OPTION, parseRemote } from './remotes.js';
 
 const port = Number(process.argv[2]);
 const restarted = process.argv[3] === '--restarted';
@@ -174,6 +175,7 @@ const LIVE_FORMAT = [
   '#{automatic-rename}',
   '#{window_id}',
   '#{pane_current_path}',
+  `#{${REMOTE_OPTION}}`,
   '#{window_name}',
 ].join('\t');
 
@@ -197,7 +199,7 @@ async function saveWindows(done) {
       if (!/no server running|error connecting/i.test(stderr)) log(`list-windows: ${stderr.trim() || err.message}`);
     } else {
       for (const line of out.split('\n').filter(Boolean)) {
-        const [session, index, id, auto, windowId, paneDir, ...name] = line.split('\t');
+        const [session, index, id, auto, windowId, paneDir, remote, ...name] = line.split('\t');
         const agent = agents.get(windowId);
         const dir = agent?.dir || paneDir;
         live.push({
@@ -208,6 +210,7 @@ async function saveWindows(done) {
           dir,
           branch: branchOf(dir),
           agent: agent ? { name: agent.agent, command: agent.command } : null,
+          remote: parseRemote(remote),
           name: name.join('\t'),
         });
       }

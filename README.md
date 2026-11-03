@@ -30,6 +30,51 @@ keys and YAML syntax errors all stop `dtmux` with every problem listed (exit
 code 2). If you change the port while dtmux runs, `dtmux` tells you so;
 `dtmux kill && dtmux` moves it.
 
+## Remote sessions
+
+A tab can live on a remote VM instead of this machine. Each remote in
+`~/.dtmux.yaml` gets a `+ <label>` button next to `+`, and its tabs wear its
+color. Nothing about a remote is built in: how to reach its controller, the
+key, the plan and the VM's lifetime are all in the config.
+
+```yaml
+remotes:
+  lunanode:                     # the name tabs remember: [a-z0-9-]
+    kind: lunanode-ctl          # VMs made by a lunanode-ctl controller (the only kind so far)
+    controller: [ssh, lunanode, lunanode-ctl]   # required: how to run the controller
+    seed: ~/.ssh/lunanode.seed  # required: caller seed, fed on stdin, never in arguments
+    identity: ~/.ssh/id_ed25519 # ssh -i for the VM: the seed's own key
+    label: LunaNode             # optional, default: the name
+    color: "#c58af9"            # optional: the tint of its tabs
+    plan: m.1s                  # optional: create --plan
+    image: Ubuntu 24.04         # optional: create --image
+    ipv4: true                  # optional: create --ipv4
+    ttlSeconds: 86400           # optional: the VM is deleted this long after it is made
+    hostPrefix: dtmux           # optional: new VMs are <hostPrefix>-<8 hex>
+    user: ubuntu                # optional: ssh login
+    attach: …                   # optional: what ssh runs there (default below)
+```
+
+`remotes` is read on every use, so edits count without a restart.
+
+- **A new tab makes a new VM** (after a confirm: VMs cost money). The tab's
+  terminal shows the progress, then lands in the VM. Creating is a managed
+  `lunanode-ctl create` with run id `dtmux-<host>`, so a dropped connection to
+  the controller, or a restart in the middle, waits for that same operation
+  rather than making a second VM.
+- **The shells run in the VM's own tmux** (session `dtmux`, status line off,
+  mouse on; installed with apt if missing). The ssh connection can go away
+  (the laptop sleeps or reboots, dtmux restarts, you Disconnect the tab) and
+  everything on the VM keeps running.
+- **Rejoining.** A dropped connection is retried in place. A tab closed by a
+  full restart or Disconnect turns dotted, remembering its VM; tapping it
+  ssh-es back into the same tmux session. If the VM is gone (past its TTL),
+  the tab says so and offers to make a new one.
+- Exiting the shell in the VM (or detaching its tmux) ends the tab; the VM
+  stays until its TTL.
+- Host keys go to `~/.dtmux/known_hosts`, not your own: VM addresses are
+  reused, and a new VM's old entry is dropped when it is made.
+
 ## Lifecycle
 
 - dtmux talks to its own tmux server (`tmux -L dtmux`), separate from any tmux

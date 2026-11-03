@@ -6,6 +6,7 @@ import { macLineEdit, macWordEdit, orderTabs, parseLayout, paneBorders, tmuxKeyN
 import { tokenize, parseBinding, fillTemplate } from '../server/tmux-bindings.js';
 import { findResumeHint } from '../server/resume-hint.js';
 import { planSwaps } from '../server/tmux-session.js';
+import { parseRemote, remoteCommand } from '../server/remotes.js';
 
 test('decodeOutput turns octal escapes back into bytes and keeps raw UTF-8', () => {
   const line = Buffer.from('%output %1 a\\033[1m\\134x caf\xc3\xa9\\015\\012', 'latin1');
@@ -390,4 +391,18 @@ test('restoreBranch switches back only when nothing can be hurt', async () => {
   assert.equal(branchOf(dir), 'feature');
   assert.match(restoreBranch(dir, 'gone'), /Could not switch/);
   fs.rmSync(dir, { recursive: true });
+});
+
+test('remote window values parse, and nothing else does', () => {
+  assert.deepEqual(parseRemote('lunanode/dtmux-1a2b3c4d'), { name: 'lunanode', host: 'dtmux-1a2b3c4d' });
+  assert.equal(parseRemote(''), null);
+  assert.equal(parseRemote('lunanode'), null);
+  assert.equal(parseRemote('a/b c'), null);
+  assert.equal(parseRemote('a/b;rm'), null);
+});
+
+test('a remote tab runs the helper, creating only when asked', () => {
+  const join = remoteCommand({ name: 'lunanode', host: 'dtmux-1a2b3c4d' });
+  assert.match(join, /DTMUX_CONFIG=\S+ DTMUX_STATE_DIR=\S+ exec \S+ \S+dtmux-remote\.js lunanode dtmux-1a2b3c4d$/);
+  assert.match(remoteCommand({ name: 'lunanode', host: 'h' }, { create: true }), / lunanode h --new$/);
 });

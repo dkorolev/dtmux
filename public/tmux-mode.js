@@ -30,6 +30,7 @@ export function startTmuxMode({ container, toolbar, params }) {
   // `tabOrder`: the user's drag-and-drop order, remembered in this browser.
   let liveWindows = [];
   let savedWindows = [];
+  let remotes = []; // [{ name, label, color, plan, ttlSeconds }] from ~/.dtmux.yaml
   const pending = new Map(); // long id -> saved window, tapped, not live yet
   let haveState = false; // false while (re)connecting: the old tabs stay put, dimmed
   let draggingTab = false;
@@ -78,12 +79,14 @@ export function startTmuxMode({ container, toolbar, params }) {
       switch (msg.t) {
         case 'idle':
           if (reloadIfStale(msg.build)) return;
+          setRemotes(msg.remotes);
           showIdle(msg.session);
           break;
         case 'hello':
           if (reloadIfStale(msg.build)) return;
           stage.querySelector('.tmux-overlay.idle')?.remove();
           newWindowButton.disabled = false;
+          setRemotes(msg.remotes);
           prefix = msg.prefix && msg.prefix !== 'None' ? msg.prefix : null;
           sessionName = msg.session;
           toolbar.setStatus(params.get('session') ? `dtmux · ${msg.session}` : 'dtmux', 'brand');
@@ -350,6 +353,11 @@ export function startTmuxMode({ container, toolbar, params }) {
     input.select();
   }
 
+  // Notices (a reopened window's branch, say) show at the top, out of the way
+  // of the prompt typed into at the bottom; resume bubbles at the bottom.
+  // Both go in 3 s, or on a click.
+  const POPUP_MS = 3000;
+
   const JOURNAL = {
     claude: 'Claude resume session journaled',
     codex: 'Codex resume session journaled',
@@ -384,7 +392,7 @@ export function startTmuxMode({ container, toolbar, params }) {
       el.remove();
     });
     stage.append(el);
-    setTimeout(() => el.remove(), 15000);
+    setTimeout(() => el.remove(), POPUP_MS);
   }
 
   function showNotice(text, kind = '') {
@@ -396,7 +404,7 @@ export function startTmuxMode({ container, toolbar, params }) {
     el.title = 'Click to dismiss';
     el.addEventListener('click', () => el.remove());
     stage.append(el);
-    setTimeout(() => el.remove(), Math.min(5000, 2500 + text.length * 20));
+    setTimeout(() => el.remove(), POPUP_MS);
   }
 
   function applyState({ windows, panes: list }) {
@@ -624,16 +632,18 @@ export function startTmuxMode({ container, toolbar, params }) {
       if (el.textContent !== label) el.textContent = label;
       if (t.kind !== 'live') closingTabs.delete(t.key); // closed: done
       el.className =
-        t.kind === 'live'
+        (t.kind === 'live'
           ? `${t.w.active ? 'active' : ''}${closingTabs.has(t.key) ? ' closing' : ''}`
           : t.kind === 'pending'
             ? 'saved pending'
-            : 'saved';
+            : 'saved') + (t.w.remote ? ' remote' : '');
+      const tint = t.w.remote ? remoteOf(t.w).color : '';
+      if (el.style.getPropertyValue('--remote') !== tint) el.style.setProperty('--remote', tint);
       const title =
         t.kind === 'live'
           ? liveTabTitle(t.w)
           : t.kind === 'pending'
-            ? `${t.w.name}\nReopening in ${t.w.dir}…`
+            ? `${t.w.name}\n${t.w.remote ? `Joining ${remoteOf(t.w).label} VM ${t.w.remote.host}…` : `Reopening in ${t.w.dir}…`}`
             : savedTabTitle(t.w);
       el.dataset.tip = title;
       if (tip?.el === el) showTip(el); // open: show the fresh facts
@@ -651,7 +661,11 @@ export function startTmuxMode({ container, toolbar, params }) {
   function liveTabTitle(w) {
     const lines = [w.name];
     const info = tabInfo.get(w.id);
-    if (!info) lines.push('…');
+    if (w.remote) {
+      const open = info?.panes[0]?.openSecs;
+      const age = open == null ? '' : `  ·  open ${duration(open + Math.round((Date.now() - info.at) / 1000))}`;
+      lines.push(`${remoteOf(w).label} VM ${w.remote.host}${age}`, 'Its shells run in the VM\'s own tmux.');
+    } else if (!info) lines.push('…');
     else {
       const age = (secs) => (secs == null ? null : duration(secs + Math.round((Date.now() - info.at) / 1000)));
       const several = info.panes.length > 1;
@@ -669,6 +683,15 @@ export function startTmuxMode({ container, toolbar, params }) {
     return lines.join('\n');
   }
   function savedTabTitle(w) {
+    if (w.remote)
+      return [
+        w.name,
+        `${remoteOf(w).label} VM ${w.remote.host}`,
+        'Tap to join it again: its shells kept running there,',
+        'unless the VM has been deleted since (its time to live).',
+        '',
+        'Drag to reorder · right-click for more',
+      ].join('\n');
     const lines = [w.name, `${w.dir}${w.branch ? `  ·  ${w.branch}` : ''}`];
     if (w.agent) lines.push(`Tap to resume ${w.agent.name}:`, `  ${w.agent.command}`);
     else lines.push('Saved, not running. Tap to start it again there.');
@@ -832,7 +855,9 @@ export function startTmuxMode({ container, toolbar, params }) {
         ? [
             [
               'Disconnect',
-              'Save this window and close it; a coding agent in it is closed first and resumes when you tap the dotted tab',
+              t.w.remote
+                ? 'Close the ssh connection; the VM and its shells keep running, and tapping the dotted tab joins them again'
+                : 'Save this window and close it; a coding agent in it is closed first and resumes when you tap the dotted tab',
               () => {
                 closingTabs.add(key);
                 setTimeout(() => closingTabs.delete(key) && renderTabs(), 10000);
@@ -842,7 +867,11 @@ export function startTmuxMode({ container, toolbar, params }) {
             ],
           ]
         : [
-            ['Reopen', `Start it again in ${t.w.dir}`, () => tabEls.get(key)?.click()],
+            [
+              'Reopen',
+              t.w.remote ? `Join ${t.w.remote.host} again` : `Start it again in ${t.w.dir}`,
+              () => tabEls.get(key)?.click(),
+            ],
             ['Forget', 'Remove this dotted tab for good', () => send({ t: 'forget', id: key })],
           ],
       x,
@@ -992,6 +1021,47 @@ export function startTmuxMode({ container, toolbar, params }) {
     side: 'left',
     title: 'New tmux window',
   });
+
+  // One "+ <remote>" button per remote in ~/.dtmux.yaml, after the plain +.
+  // Each makes a new VM, which costs money, so it asks first.
+  const remoteButtons = new Map(); // name -> button
+  function setRemotes(list) {
+    remotes = Array.isArray(list) ? list : [];
+    const names = new Set(remotes.map((r) => r.name));
+    for (const [name, b] of remoteButtons) if (!names.has(name)) (b.remove(), remoteButtons.delete(name));
+    let after = newWindowButton;
+    for (const r of remotes) {
+      let b = remoteButtons.get(r.name);
+      if (!b) {
+        b = toolbar.addButton('', () => newRemote(r.name), { side: 'left' });
+        b.classList.add('new-remote');
+        remoteButtons.set(r.name, b);
+      }
+      b.textContent = `+ ${r.label}`;
+      b.title = `New ${r.label} VM (${r.plan}), deleted after ${hours(r.ttlSeconds)}`;
+      b.style.setProperty('--remote', r.color);
+      b.disabled = newWindowButton.disabled;
+      after.after(b);
+      after = b;
+    }
+    renderTabs();
+  }
+  function newRemote(name) {
+    const r = remotes.find((x) => x.name === name);
+    if (!r) return;
+    const ok = confirm(
+      `Make a new ${r.label} VM?\n\nPlan ${r.plan}; it costs money while it exists and is deleted after ${hours(r.ttlSeconds)}.\nMaking it takes a few minutes; the new tab shows how it goes.`,
+    );
+    if (ok) send({ t: 'new-remote', name });
+    panes.get(activePane)?.term.focus();
+  }
+  const hours = (s) => (s % 3600 ? `${Math.round(s / 60)} min` : `${s / 3600}h`);
+  // The remote a tab's window is on, as configured (or a stand-in).
+  const remoteOf = (w) =>
+    remotes.find((r) => r.name === w.remote?.name) ?? { label: w.remote?.name ?? '', color: '#c58af9' };
+  new MutationObserver(() => {
+    for (const b of remoteButtons.values()) b.disabled = newWindowButton.disabled;
+  }).observe(newWindowButton, { attributes: true, attributeFilter: ['disabled'] });
 
   // Both restarts run the code on disk now. Soft: only dtmux restarts; tmux
   // and every shell keep running and the page reattaches. Full: the windows

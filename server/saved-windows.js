@@ -8,9 +8,10 @@
 //
 // ~/.dtmux/saved-windows.json:
 //   { "version": 1, "savedAt": ISO time,
-//     "sessions": { "<session>": [ { id, name, autoName, dir, branch?, agent? }, ... ] } }
+//     "sessions": { "<session>": [ { id, name, autoName, dir, branch?, agent?, remote? }, ... ] } }
 // `branch`: the git branch `dir` was on. `agent`: { name, command }, the coding
 // agent that ran there and the command that resumes it (see agent-close.js).
+// `remote`: { name, host }, for a tab on a remote VM (see remotes.js).
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -29,8 +30,10 @@ const isEntry = (e) =>
   e && typeof e.id === 'string' && e.id && typeof e.name === 'string' && typeof e.dir === 'string';
 
 // The fields kept for a saved window; anything else is dropped.
-function clean({ id, name, autoName, dir, branch, agent }) {
+function clean({ id, name, autoName, dir, branch, agent, remote }) {
   const e = { id, name, autoName: Boolean(autoName), dir };
+  if (remote && typeof remote.name === 'string' && typeof remote.host === 'string' && remote.name && remote.host)
+    e.remote = { name: remote.name, host: remote.host };
   if (typeof branch === 'string' && branch) e.branch = branch;
   if (agent && typeof agent.name === 'string' && typeof agent.command === 'string' && agent.command)
     e.agent = { name: agent.name, command: agent.command };
@@ -96,7 +99,8 @@ export function addSaved(session, entry) {
 // saved one (same name, directory and naming) stands in for it, one for one.
 // Without that, the window tmux must create to start a session after a
 // restart (a shell in ~) would add another copy to the list on every stop.
-const sameLook = (a, b) => a.name === b.name && a.dir === b.dir && a.autoName === b.autoName;
+const sameLook = (a, b) =>
+  a.name === b.name && a.dir === b.dir && a.autoName === b.autoName && a.remote?.host === b.remote?.host;
 export function saveOnStop(live) {
   const next = new Map();
   for (const w of [...live].sort((a, b) => a.index - b.index)) {

@@ -3,10 +3,12 @@
 // Each tmux pane becomes its own xterm.js terminal in the browser, so the
 // browser holds the real scrollback and scrolling never round-trips to tmux.
 // Messages to the browser, all JSON:
-//   hello  { session, prefix, commit, build }  once attached; `build` fingerprints
-//                                         the page's files, see app.js
+//   hello  { session, prefix, commit, build, remotes }  once attached; `build`
+//                                         fingerprints the page's files, see app.js;
+//                                         `remotes`: [{ name, label, color, plan, ttlSeconds }]
 //   state  { windows, panes }             after any structural change; each
-//                                         window carries its long id as `uid`
+//                                         window carries its long id as `uid`, and
+//                                         `remote` { name, host } when it is on a VM
 //   init   { p, d }                       a pane's history and modes, base64
 //   out    { p, d }                       pane output, base64
 //   exit   { reason, sessionGone }        tmux detached or the session ended
@@ -15,9 +17,9 @@
 //   notice { text, kind? }                tmux messages, command output, things we undid
 //   journal { agent, command, dir, branch, commit, dirty }
 //                                         a resume command showed up on a pane
-//   saved  { windows: [{ id, name, dir }] }
+//   saved  { windows: [{ id, name, dir, branch, agent, remote }] }
 //                                         windows saved when dtmux last stopped
-//   idle   { session, build }             the session does not exist but saved
+//   idle   { session, build, remotes }    the session does not exist but saved
 //                                         windows do: nothing is started until
 //                                         the page sends resume or new-session
 // Messages from the browser:
@@ -26,6 +28,7 @@
 //   keys   { keys }         tmux key names routed through tmux key bindings
 //   answer { id, values }   the reply to a prompt; values null when cancelled
 //   select-window { w }, select-pane { p }, new-window, open { url }
+//   new-remote { name }    a new tab on a new VM of that remote (see remotes.js)
 //   resize-pane { p, axis, size }  drag a border; axis "x" (width) or "y" (height)
 //   resume { id }          reopen a saved window: same name, same directory
 //   reorder { ws }         put tmux's windows in this order (window ids, a tab drag)
@@ -50,6 +53,8 @@ import { windowInfo } from './pane-info.js';
 import { closeAgents } from './agent-close.js';
 import { branchOf, restoreBranch } from './git-branch.js';
 import { savedFor, takeSaved, addSaved, savedEvents, newWindowId, ID_OPTION } from './saved-windows.js';
+import { REMOTE_OPTION, parseRemote, remoteValue, currentRemotes, newHost, remoteCommand } from './remotes.js';
+import { pageRemotes } from './remote-config.js';
 
 const HISTORY_LINES = 10000; // keep in sync with the browser's scrollback
 const SEND_CHUNK = 256; // bytes per send-keys command
@@ -60,6 +65,7 @@ const WINDOW_FORMAT = [
   '#{window_active}',
   '#{window_visible_layout}',
   `#{${ID_OPTION}}`,
+  `#{${REMOTE_OPTION}}`,
   '#{window_name}',
 ].join('\t');
 const PANE_FORMAT = [
@@ -110,7 +116,23 @@ const MODE_NOTICES = {
 const UNWEDGE_KEYS = ['Escape', 'C-c', 'Escape', 'C-c'];
 
 // What a page sees of a saved window.
-const pageEntry = ({ id, name, dir, branch, agent }) => ({ id, name, dir, branch: branch ?? null, agent: agent ?? null });
+const pageEntry = ({ id, name, dir, branch, agent, remote }) => ({
+  id,
+  name,
+  dir,
+  branch: branch ?? null,
+  agent: agent ?? null,
+  remote: remote ?? null,
+});
+
+// The remotes for the page; none while ~/.dtmux.yaml is invalid.
+function remotesForPage() {
+  try {
+    return pageRemotes(currentRemotes());
+  } catch {
+    return [];
+  }
+}
 
 // Directories of every open pane, to know which checkouts are in use.
 function openDirs() {
@@ -188,7 +210,7 @@ export function attachTmuxSession(ws, opts) {
     ws.on('close', leave);
     savedEvents.on('change', onSavedChange);
     sendSaved(); // ahead of idle, so the page draws the dotted tabs at once
-    send({ t: 'idle', session, build: opts.build });
+    send({ t: 'idle', session, build: opts.build, remotes: remotesForPage() });
   });
 }
 
@@ -197,17 +219,20 @@ export function attachTmuxSession(ws, opts) {
 function bridge(ws, opts) {
   const { session, commit = '', build = '', onStop = () => {}, onRestart = () => {}, onSoftRestart = () => {}, first = null, reopen = [] } = opts;
   let { cols, rows } = opts;
-  const firstDir = first && (isDir(first.dir) ? first.dir : os.homedir());
-  const firstBranchNote = first && firstDir === first.dir ? restoreBranch(firstDir, first.branch, openDirs()) : null;
+  const firstRemote = first?.remote ?? null;
+  const firstDir = first && (firstRemote ? os.homedir() : isDir(first.dir) ? first.dir : os.homedir());
+  const firstBranchNote = first && !firstRemote && firstDir === first.dir ? restoreBranch(firstDir, first.branch, openDirs()) : null;
   const tmux = new TmuxControl({
     session,
     cols,
     rows,
     cwd: firstDir || os.homedir(),
-    windowName: first && !first.autoName ? first.name : null,
+    windowName: first && (firstRemote || !first.autoName) ? first.name : null,
+    command: firstRemote ? remoteCommand(firstRemote) : null,
   });
   // Ahead of every other command, so the first window keeps its saved id.
   if (first) tmux.run(`set-option -w ${ID_OPTION} ${quote(first.id)}`);
+  if (firstRemote) tmux.run(`set-option -w ${REMOTE_OPTION} ${quote(remoteValue(firstRemote))}`);
   if (first?.agent) tmux.run('display -p "#{pane_id}"', (err, lines) => !err && typeAgent(lines[0], first.agent));
   const panes = new Map(); // pane id -> { ready }
   const tails = new Map(); // pane id -> recent plain text, for resume hints
@@ -261,7 +286,7 @@ function bridge(ws, opts) {
     if (err) return;
     const [name, prefix] = lines[0].split('\t');
     clientName = name;
-    send({ t: 'hello', session, prefix, commit, build });
+    send({ t: 'hello', session, prefix, commit, build, remotes: remotesForPage() });
     sendSaved();
   });
   const sendSaved = () =>
@@ -271,7 +296,7 @@ function bridge(ws, opts) {
   loadBindings();
   refresh();
   for (const entry of reopen) openSaved(entry);
-  if (first && firstDir !== first.dir)
+  if (first && !firstRemote && firstDir !== first.dir)
     send({ t: 'notice', text: `${first.dir || 'The saved directory'} is gone; opened "${first.name}" in your home directory.`, kind: 'bad' });
   if (firstBranchNote) send({ t: 'notice', text: firstBranchNote, kind: /^Switched/.test(firstBranchNote) ? '' : 'bad' });
 
@@ -403,14 +428,14 @@ function bridge(ws, opts) {
     tmux.runList([`list-windows -F ${quote(WINDOW_FORMAT)}`, `list-panes -s -F ${quote(PANE_FORMAT)}`], ([w, p]) => {
       if (w.err || p.err) return;
       const windows = w.lines.filter(Boolean).map((l) => {
-        let [id, index, active, layout, uid, ...name] = l.split('\t');
+        let [id, index, active, layout, uid, remote, ...name] = l.split('\t');
         // Every window gets a long unique id the first time we see it, so a
         // saved window can be told apart from any other after a restart.
         if (!uid) {
           uid = newWindowId();
           tmux.run(`set-option -w -t ${id} ${ID_OPTION} ${uid}`);
         }
-        return { id, uid, index: Number(index), active: active === '1', layout, name: name.join('\t') };
+        return { id, uid, index: Number(index), active: active === '1', layout, remote: parseRemote(remote), name: name.join('\t') };
       });
       const list = p.lines.filter(Boolean).map((l) => {
         const [id, window, active, width, height, cmd] = l.split('\t');
@@ -521,6 +546,9 @@ function bridge(ws, opts) {
       case 'new-window':
         tmux.run('new-window -c "#{pane_current_path}"');
         break;
+      case 'new-remote':
+        if (typeof msg.name === 'string') newRemote(msg.name);
+        break;
       case 'open':
         openExternal(msg.url);
         break;
@@ -558,13 +586,15 @@ function bridge(ws, opts) {
   const closing = new Set();
   function disconnectWindow(w) {
     if (closing.has(w)) return;
-    const format = ['#{window_id}', `#{${ID_OPTION}}`, '#{automatic-rename}', '#{pane_current_path}', '#{window_name}'].join('\t');
+    const format = ['#{window_id}', `#{${ID_OPTION}}`, '#{automatic-rename}', '#{pane_current_path}', `#{${REMOTE_OPTION}}`, '#{window_name}'].join('\t');
     tmux.run(`display -p -t ${w} ${quote(format)}`, async (err, lines) => {
       if (err || !lines[0]) return;
-      const [id, uid, auto, dir, ...name] = lines[0].split('\t');
+      const [id, uid, auto, dir, remoteVal, ...name] = lines[0].split('\t');
+      const remote = parseRemote(remoteVal);
       if (id !== w) return; // tmux fell back to another window: that one is not ours to close
       closing.add(w);
-      const agents = await closeAgents(session, { target: w, log: (m) => console.log(`[${session}] ${m}`) });
+      // On a VM the agents run there, in its own tmux: they keep running.
+      const agents = remote ? [] : await closeAgents(session, { target: w, log: (m) => console.log(`[${session}] ${m}`) });
       closing.delete(w);
       const agent = agents.find((a) => a.active) ?? agents[0];
       const where = agent?.dir || dir;
@@ -573,8 +603,9 @@ function bridge(ws, opts) {
         name: name.join('\t'),
         autoName: auto === '1',
         dir: where,
-        branch: branchOf(where),
+        branch: remote ? null : branchOf(where),
         agent: agent?.command ? { name: agent.agent, command: agent.command } : null,
+        remote,
       });
       execFile(TMUX_BIN, tmuxArgs('kill-window', '-t', w), (e, _o, stderr) => {
         if (e && !/can't find window/.test(stderr)) send({ t: 'notice', text: `Could not close the window: ${stderr.trim() || e.message}`, kind: 'bad' });
@@ -595,6 +626,7 @@ function bridge(ws, opts) {
     if (entry) openSaved(entry);
   }
   function openSaved(entry) {
+    if (entry.remote) return openRemote(entry.remote, entry.id, entry.name);
     let dir = entry.dir;
     if (!isDir(dir)) {
       send({ t: 'notice', text: `${dir || 'The saved directory'} is gone; opened "${entry.name}" in your home directory.`, kind: 'bad' });
@@ -614,6 +646,29 @@ function bridge(ws, opts) {
         else typeAgent(made.lines[0], entry.agent);
       },
     );
+  }
+
+  // A tab on a VM: `create` makes the VM (a new tab), else it is joined.
+  function openRemote(where, id, name, { create = false } = {}) {
+    tmux.runList(
+      [
+        `new-window -P -F "#{pane_id}" -c ${quote(os.homedir())} -n ${quote(name)} ${quote(remoteCommand(where, { create }))}`,
+        `set-option -w ${ID_OPTION} ${quote(id)}`,
+        `set-option -w ${REMOTE_OPTION} ${quote(remoteValue(where))}`,
+      ],
+      ([made]) => made.err && send({ t: 'notice', text: `Could not open "${name}": ${made.err.message}`, kind: 'bad' }),
+    );
+  }
+  function newRemote(name) {
+    let remote;
+    try {
+      remote = currentRemotes()[name];
+    } catch (err) {
+      return send({ t: 'notice', text: err.message, kind: 'bad' });
+    }
+    if (!remote) return send({ t: 'notice', text: `No remote "${name}" in ~/.dtmux.yaml any more.`, kind: 'bad' });
+    const host = newHost(remote);
+    openRemote({ name, host }, newWindowId(), host, { create: true });
   }
 
   // Swap windows until tmux's index order matches the page's tab order, so

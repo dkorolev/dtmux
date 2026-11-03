@@ -10,12 +10,21 @@ import { parseDocument } from 'yaml';
 
 export const CONFIG_PATH = process.env.DTMUX_CONFIG || path.join(os.homedir(), '.dtmux.yaml');
 
-// key -> { type description, default, check(value) -> error string | null }
+import { checkRemotes, normalizeRemotes } from './remote-config.js';
+
+// key -> { describe, default, check(value) -> error string(s) | null,
+//          normalize?(value) -> the value the rest of dtmux sees }
 export const SCHEMA = {
   port: {
     describe: 'integer from 1 to 65535',
     default: 7778,
     check: (v) => (Number.isInteger(v) && v >= 1 && v <= 65535 ? null : 'must be an integer from 1 to 65535'),
+  },
+  remotes: {
+    describe: 'mapping: remote name -> how to reach it (see README, "Remote sessions")',
+    default: {},
+    check: checkRemotes,
+    normalize: normalizeRemotes,
   },
 };
 
@@ -47,10 +56,13 @@ export function parseConfig(text, file = CONFIG_PATH) {
       continue;
     }
     const err = spec.check(value);
-    if (err) problems.push(`${key}: ${err}, got ${show(value)}`);
+    if (Array.isArray(err)) problems.push(...err.map((e) => `${key}.${e}`));
+    else if (err) problems.push(`${key}: ${err}, got ${show(value)}`);
   }
   if (problems.length) throw new ConfigError(file, problems);
-  return { ...defaults, ...data };
+  const out = { ...defaults, ...data };
+  for (const [key, spec] of Object.entries(SCHEMA)) if (spec.normalize) out[key] = spec.normalize(out[key]);
+  return out;
 }
 
 export function loadConfig(file = CONFIG_PATH) {
