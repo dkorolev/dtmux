@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>dtmux</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="stylesheet" href="/vendor/xterm.css" />
+    <link rel="stylesheet" href="/app.css" />
+  </head>
+  <body>
+    <header id="toolbar">
+      <div class="group" id="toolbar-left">
+        <span id="status" class="status" data-commit="__XTERMJS_COMMIT__" data-start-cmd="__DTMUX_START_CMD__" title="__XTERMJS_COMMIT__">connecting…</span>
+        <span id="indicator" class="indicator" hidden></span>
+        <nav id="tabs" class="tabs"></nav>
+      </div>
+      <div class="group" id="toolbar-right">
+        <!-- Future controls go here (links, menu, …). See toolbar.addButton() in app.js. -->
+      </div>
+    </header>
+    <main id="terminal"></main>
+    <script type="module" src="/app.js?v=__XTERMJS_COMMIT__"></script>
+  </body>
+</html>

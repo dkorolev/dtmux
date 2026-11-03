@@ -1,0 +1,26 @@
+{
+  "name": "dtmux",
+  "version": "0.1.0",
+  "private": true,
+  "description": "dtmux: a browser terminal (xterm.js) over its own tmux server, run as a daemon",
+  "type": "module",
+  "bin": {
+    "dtmux": "bin/dtmux.js"
+  },
+  "scripts": {
+    "start": "node bin/dtmux.js start",
+    "stop": "node bin/dtmux.js kill",
+    "postinstall": "node -e \"require('fs').readdirSync('node_modules/node-pty/prebuilds',{withFileTypes:true}).forEach(e=>{const f='node_modules/node-pty/prebuilds/'+e.name+'/spawn-helper';try{require('fs').chmodSync(f,0o755)}catch{}})\"",
+    "test": "node --test test/*.test.js"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@xterm/addon-fit": "^0.12.0-beta.332",
+    "@xterm/addon-web-links": "^0.13.0-beta.330",
+    "@xterm/addon-webgl": "^0.20.0-beta.329",
+    "@xterm/xterm": "^6.1.0-beta.336",
+    "node-pty": "^1.1.0",
+    "ws": "^8.22.1",
+    "yaml": "^2.9.1"
+  }
+}

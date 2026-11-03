@@ -1,0 +1,154 @@
+// A tmux control-mode client (`tmux -C`), speaking the line protocol over pipes.
+//
+// tmux writes one notification per line (`%output`, `%layout-change`, ...).
+// Replies to our commands arrive wrapped in `%begin ... %end` (or `%error`)
+// blocks, in the order the commands were sent. A block's third field is 1 when
+// the command came from this client and 0 when tmux ran it on its own (for
+// example a key binding), so only flag-1 blocks are matched to callbacks.
+import { spawn } from 'node:child_process';
+import { EventEmitter } from 'node:events';
+
+export const TMUX_BIN = process.env.TMUX_BIN || 'tmux';
+
+// dtmux runs its own tmux server (`tmux -L <socket>`), apart from any tmux the
+// user runs by hand, so stopping dtmux can take down exactly its sessions.
+export const TMUX_SOCKET = process.env.DTMUX_TMUX_SOCKET || 'dtmux';
+export const tmuxArgs = (...args) => ['-L', TMUX_SOCKET, ...args];
+
+// %output data escapes bytes below 0x20 and the backslash as `\ooo` octal.
+// Everything else, including UTF-8, arrives as raw bytes.
+export function decodeOutput(buf, start) {
+  const out = Buffer.allocUnsafe(buf.length - start);
+  let j = 0;
+  for (let i = start; i < buf.length; i++) {
+    const b = buf[i];
+    if (b === 0x5c && i + 3 < buf.length && isOctal(buf[i + 1]) && isOctal(buf[i + 2]) && isOctal(buf[i + 3])) {
+      out[j++] = ((buf[i + 1] - 48) << 6) | ((buf[i + 2] - 48) << 3) | (buf[i + 3] - 48);
+      i += 3;
+    } else {
+      out[j++] = b;
+    }
+  }
+  return out.subarray(0, j);
+}
+const isOctal = (b) => b >= 48 && b <= 55;
+
+// Quote a string as one tmux command argument.
+export function quote(s) {
+  return '"' + String(s).replace(/[\\"$]/g, '\\$&') + '"';
+}
+
+export class TmuxControl extends EventEmitter {
+  // Attach to `session`, creating it at cols x rows if it does not exist, its
+  // first window in `cwd` and, when given, named `windowName`.
+  constructor({ session, cols, rows, cwd, windowName }) {
+    super();
+    const env = { ...process.env, TERM: 'xterm-256color' };
+    delete env.TMUX; // we may ourselves be running inside tmux
+    delete env.TMUX_PANE;
+    this.proc = spawn(
+      TMUX_BIN,
+      tmuxArgs('-C', 'new-session', '-A', '-s', session, '-x', String(cols), '-y', String(rows), '-c', cwd, ...(windowName ? ['-n', windowName] : [])),
+      { env, stdio: ['pipe', 'pipe', 'pipe'] },
+    );
+    this._buf = Buffer.alloc(0);
+    this._block = null;
+    this._pending = [];
+    this.closed = false;
+    this.proc.stdout.on('data', (chunk) => this._onData(chunk));
+    this.proc.stderr.on('data', (d) => this.emit('stderr', d.toString()));
+    this.proc.stdin.on('error', () => {});
+    this.proc.on('error', (err) => this._finish(err.message));
+    this.proc.on('exit', (code, signal) => this._finish(`tmux exited (${signal ?? code})`));
+  }
+
+  // Run one command. `cb(err, lines)` runs synchronously when its reply block
+  // ends, before any later protocol line is processed. Callers rely on that
+  // to switch pane output on at exactly the right point in the stream.
+  run(cmd, cb = () => {}) {
+    this.runList([cmd], ([r]) => cb(r.err, r.lines));
+  }
+
+  // Run commands as one command list. tmux executes a list without reading
+  // pane output in between, so the list acts as one atomic step.
+  runList(cmds, cb = () => {}) {
+    if (this.closed) {
+      cb(cmds.map(() => ({ err: new Error('tmux control client closed'), lines: [] })));
+      return;
+    }
+    const results = new Array(cmds.length);
+    let left = cmds.length;
+    cmds.forEach((_, i) =>
+      this._pending.push((err, lines) => {
+        results[i] = { err, lines };
+        if (--left === 0) cb(results);
+      }),
+    );
+    this.proc.stdin.write(cmds.join(' ; ') + '\n');
+  }
+
+  // Promise form of run(), for callers that do not need synchronous ordering.
+  command(cmd) {
+    return new Promise((resolve, reject) => this.run(cmd, (err, lines) => (err ? reject(err) : resolve(lines))));
+  }
+
+  // Detach. Closing stdin makes the control client exit; the session lives on.
+  close() {
+    if (this.closed) return;
+    this.proc.stdin.end();
+    setTimeout(() => this.proc.kill(), 2000).unref();
+  }
+
+  _onData(chunk) {
+    this._buf = this._buf.length ? Buffer.concat([this._buf, chunk]) : chunk;
+    let start = 0;
+    let nl;
+    while ((nl = this._buf.indexOf(10, start)) !== -1) {
+      this._onLine(this._buf.subarray(start, nl));
+      start = nl + 1;
+    }
+    this._buf = this._buf.subarray(start);
+  }
+
+  _onLine(line) {
+    if (this._block) {
+      const head = line.toString('latin1', 0, Math.min(line.length, 64));
+      if (head === `%end ${this._block.id}` || head === `%error ${this._block.id}`) {
+        const { flags, lines } = this._block;
+        this._block = null;
+        if (flags === '1') {
+          const cb = this._pending.shift();
+          if (cb) cb(head.startsWith('%error') ? new Error(lines.join('\n') || 'tmux error') : null, lines);
+        }
+      } else {
+        this._block.lines.push(line.toString('utf8'));
+      }
+      return;
+    }
+    if (line[0] !== 0x25 /* % */) return;
+    const sp = line.indexOf(32);
+    const name = line.toString('latin1', 1, sp === -1 ? line.length : sp);
+    if (name === 'output') {
+      const sp2 = line.indexOf(32, sp + 1);
+      if (sp2 === -1) return;
+      this.emit('output', line.toString('latin1', sp + 1, sp2), decodeOutput(line, sp2 + 1));
+      return;
+    }
+    const rest = sp === -1 ? '' : line.toString('utf8', sp + 1);
+    if (name === 'begin') {
+      this._block = { id: rest, flags: rest.split(' ')[2], lines: [] };
+    } else if (name === 'exit') {
+      this._finish(rest || 'detached');
+    } else {
+      this.emit('notify', name, rest);
+    }
+  }
+
+  _finish(reason) {
+    if (this.closed) return;
+    this.closed = true;
+    const err = new Error(reason);
+    for (const cb of this._pending.splice(0)) cb(err, []);
+    this.emit('exit', reason);
+  }
+}
