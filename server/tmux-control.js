@@ -53,7 +53,8 @@ export class TmuxControl extends EventEmitter {
     );
     this._buf = Buffer.alloc(0);
     this._block = null;
-    this._pending = [];
+    this._pending = []; // one { cb } per command, or { mark, ... } for runLine
+    this._marks = 0;
     this.closed = false;
     this.proc.stdout.on('data', (chunk) => this._onData(chunk));
     this.proc.stderr.on('data', (d) => this.emit('stderr', d.toString()));
@@ -79,12 +80,30 @@ export class TmuxControl extends EventEmitter {
     const results = new Array(cmds.length);
     let left = cmds.length;
     cmds.forEach((_, i) =>
-      this._pending.push((err, lines) => {
-        results[i] = { err, lines };
-        if (--left === 0) cb(results);
+      this._pending.push({
+        cb: (err, lines) => {
+          results[i] = { err, lines };
+          if (--left === 0) cb(results);
+        },
       }),
     );
     this.proc.stdin.write(cmds.join(' ; ') + '\n');
+  }
+
+  // Run a command line we did not write, such as a key binding's, which may
+  // hold any number of commands. tmux answers each one separately, so the
+  // replies are collected up to a marker sent on a line of its own (which
+  // runs even when the first line does not parse). `cb(err, lines)` gets the
+  // first error and every output line.
+  runLine(line, cb = () => {}) {
+    if (this.closed) {
+      cb(new Error('tmux control client closed'), []);
+      return;
+    }
+    const mark = `dtmux-mark-${++this._marks}`;
+    this._pending.push({ mark, err: null, lines: [], cb });
+    // An empty line would detach this client.
+    this.proc.stdin.write(`${line.trim() ? `${line}\n` : ''}display -p ${mark}\n`);
   }
 
   // Promise form of run(), for callers that do not need synchronous ordering.
@@ -116,9 +135,18 @@ export class TmuxControl extends EventEmitter {
       if (head === `%end ${this._block.id}` || head === `%error ${this._block.id}`) {
         const { flags, lines } = this._block;
         this._block = null;
-        if (flags === '1') {
-          const cb = this._pending.shift();
-          if (cb) cb(head.startsWith('%error') ? new Error(lines.join('\n') || 'tmux error') : null, lines);
+        const p = flags === '1' && this._pending[0];
+        if (!p) return;
+        const err = head.startsWith('%error') ? new Error(lines.join('\n') || 'tmux error') : null;
+        if (!p.mark) {
+          this._pending.shift();
+          p.cb(err, lines);
+        } else if (!err && lines.length === 1 && lines[0] === p.mark) {
+          this._pending.shift();
+          p.cb(p.err, p.lines);
+        } else {
+          p.err ??= err;
+          p.lines.push(...lines);
         }
       } else {
         this._block.lines.push(line.toString('utf8'));
@@ -148,7 +176,7 @@ export class TmuxControl extends EventEmitter {
     if (this.closed) return;
     this.closed = true;
     const err = new Error(reason);
-    for (const cb of this._pending.splice(0)) cb(err, []);
+    for (const p of this._pending.splice(0)) p.cb(err, []);
     this.emit('exit', reason);
   }
 }

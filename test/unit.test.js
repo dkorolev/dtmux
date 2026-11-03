@@ -2,9 +2,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { decodeOutput, quote } from '../server/tmux-control.js';
 import { trackKitty, kittyRestoreSequence, recordKittyCommand, forgetPane } from '../server/kitty-tracker.js';
-import { macLineEdit, macWordEdit, parseLayout, paneBorders, tmuxKeyName, windowSwitchDirection } from '../public/tmux-util.js';
+import { macLineEdit, macWordEdit, orderTabs, parseLayout, paneBorders, tmuxKeyName, windowSwitchDirection } from '../public/tmux-util.js';
 import { tokenize, parseBinding, fillTemplate } from '../server/tmux-bindings.js';
 import { findResumeHint } from '../server/resume-hint.js';
+import { planSwaps } from '../server/tmux-session.js';
 
 test('decodeOutput turns octal escapes back into bytes and keeps raw UTF-8', () => {
   const line = Buffer.from('%output %1 a\\033[1m\\134x caf\xc3\xa9\\015\\012', 'latin1');
@@ -200,4 +201,44 @@ test('fillTemplate follows tmux: first %% and every %N, %%% escapes quotes', () 
   assert.equal(fillTemplate('a %% b %%', ['x']), 'a x b %%');
   assert.equal(fillTemplate('a %1 %2 %1', ['x', 'y']), 'a x y x');
   assert.equal(fillTemplate('a "%%%"', ['q"$']), 'a "q\\"\\$"');
+});
+
+test('orderTabs keeps the remembered order, puts new tabs last, and remembers absent ones', () => {
+  const items = ['b', 'x', 'a', 'c'].map((key) => ({ key }));
+  const { tabs, order } = orderTabs(['c', 'gone', 'a', 'b'], items);
+  assert.deepEqual(tabs.map((t) => t.key), ['c', 'a', 'b', 'x']);
+  assert.deepEqual(order, ['c', 'gone', 'a', 'b', 'x']);
+  // A window that comes back takes its old place.
+  const back = orderTabs(order, ['gone', 'x', 'c'].map((key) => ({ key })));
+  assert.deepEqual(back.tabs.map((t) => t.key), ['c', 'gone', 'x']);
+  // Over the cap, absent keys go first, oldest first.
+  const capped = orderTabs(['p', 'q', 'a', 'r'], [{ key: 'a' }, { key: 'n' }], 3);
+  assert.deepEqual(capped.order, ['a', 'r', 'n']);
+});
+
+test('planSwaps puts tmux windows in tab order, using their existing indexes', () => {
+  const apply = (current, swaps) => {
+    const at = new Map(current.map((w) => [w.index, w.id]));
+    for (const [a, b] of swaps) {
+      const ia = [...at].find(([, id]) => id === a)[0];
+      const ib = [...at].find(([, id]) => id === b)[0];
+      at.set(ia, b);
+      at.set(ib, a);
+    }
+    return [...at].sort((x, y) => x[0] - y[0]).map(([, id]) => id);
+  };
+  const current = [
+    { id: '@1', index: 1 },
+    { id: '@2', index: 2 },
+    { id: '@5', index: 4 },
+    { id: '@7', index: 9 },
+  ];
+  assert.deepEqual(planSwaps(current, ['@1', '@2', '@5', '@7']), []);
+  for (const wanted of [['@7', '@1', '@2', '@5'], ['@5', '@7', '@2', '@1'], ['@2', '@1'], ['@9', '@7']]) {
+    const swaps = planSwaps(current, wanted);
+    const named = wanted.filter((id) => current.some((w) => w.id === id));
+    const got = apply(current, swaps);
+    assert.deepEqual(got.slice(0, named.length), named);
+    assert.deepEqual(got.slice(named.length), current.map((w) => w.id).filter((id) => !named.includes(id)));
+  }
 });

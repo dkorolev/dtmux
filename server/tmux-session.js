@@ -4,7 +4,8 @@
 // browser holds the real scrollback and scrolling never round-trips to tmux.
 // Messages to the browser, all JSON:
 //   hello  { session, prefix, commit }    once attached
-//   state  { windows, panes }             after any structural change
+//   state  { windows, panes }             after any structural change; each
+//                                         window carries its long id as `uid`
 //   init   { p, d }                       a pane's history and modes, base64
 //   out    { p, d }                       pane output, base64
 //   exit   { reason, sessionGone }        tmux detached or the session ended
@@ -26,8 +27,10 @@
 //   select-window { w }, select-pane { p }, new-window, open { url }
 //   resize-pane { p, axis, size }  drag a border; axis "x" (width) or "y" (height)
 //   resume { id }          reopen a saved window: same name, same directory
+//   reorder { ws }         put tmux's windows in this order (window ids, a tab drag)
 //   new-session            while idle: start the session empty
-//   stop                   stop the whole daemon (the Stop button)
+//   stop                   stop the whole daemon
+//   restart                stop the daemon and start it again (the Restart button)
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -104,7 +107,7 @@ const isWindowId = (s) => typeof s === 'string' && /^@\d+$/.test(s);
 // start nothing: show the saved windows and let the page pick one to start
 // the session with, or ask for an empty session.
 export function attachTmuxSession(ws, opts) {
-  const { session, onStop = () => {} } = opts;
+  const { session, onStop = () => {}, onRestart = () => {} } = opts;
   const exists = (cb) => execFile(TMUX_BIN, tmuxArgs('has-session', '-t', `=${session}`), (err) => cb(!err));
   exists((yes) => {
     if (yes || !savedFor(session).length) return bridge(ws, opts);
@@ -113,6 +116,8 @@ export function attachTmuxSession(ws, opts) {
       send({ t: 'saved', windows: savedFor(session).map(({ id, name, dir }) => ({ id, name, dir })) });
     const onSavedChange = (s) => s === session && sendSaved();
     let { cols, rows } = opts;
+    let starting = false;
+    const more = []; // saved windows tapped while the session was starting
     const leave = () => {
       ws.off('message', onMessage);
       ws.off('close', leave);
@@ -120,14 +125,19 @@ export function attachTmuxSession(ws, opts) {
     };
     // Another page may have started the session meanwhile; then the saved
     // window opens as a new window in it instead of as its first.
-    const start = (entry) =>
+    const start = (entry) => {
+      if (starting) {
+        if (entry) more.push(entry);
+        return;
+      }
+      starting = true;
       exists((now) => {
         leave();
         if (ws.readyState !== ws.OPEN) return;
-        if (!entry) bridge(ws, { ...opts, cols, rows });
-        else if (now) bridge(ws, { ...opts, cols, rows, reopen: entry });
-        else bridge(ws, { ...opts, cols, rows, first: entry });
+        if (!entry || now) bridge(ws, { ...opts, cols, rows, reopen: [entry, ...more].filter(Boolean) });
+        else bridge(ws, { ...opts, cols, rows, first: entry, reopen: more });
       });
+    };
     function onMessage(raw) {
       let msg;
       try {
@@ -143,18 +153,19 @@ export function attachTmuxSession(ws, opts) {
         const entry = takeSaved(session, msg.id);
         if (entry) start(entry);
       } else if (msg.t === 'stop') onStop();
+      else if (msg.t === 'restart') onRestart();
     }
     ws.on('message', onMessage);
     ws.on('close', leave);
     savedEvents.on('change', onSavedChange);
+    sendSaved(); // ahead of idle, so the page draws the dotted tabs at once
     send({ t: 'idle', session });
-    sendSaved();
   });
 }
 
 // `first`: a saved window to start a new session with. `reopen`: a saved
 // window to open in the (existing) session once attached.
-function bridge(ws, { session, cols, rows, commit = '', onStop = () => {}, first = null, reopen = null }) {
+function bridge(ws, { session, cols, rows, commit = '', onStop = () => {}, onRestart = () => {}, first = null, reopen = [] }) {
   const firstDir = first && (isDir(first.dir) ? first.dir : os.homedir());
   const tmux = new TmuxControl({
     session,
@@ -218,7 +229,7 @@ function bridge(ws, { session, cols, rows, commit = '', onStop = () => {}, first
   savedEvents.on('change', onSavedChange);
   loadBindings();
   refresh();
-  if (reopen) openSaved(reopen);
+  for (const entry of reopen) openSaved(entry);
   if (first && firstDir !== first.dir)
     send({ t: 'notice', text: `${first.dir || 'The saved directory'} is gone; opened "${first.name}" in your home directory.`, kind: 'bad' });
 
@@ -295,7 +306,7 @@ function bridge(ws, { session, cols, rows, commit = '', onStop = () => {}, first
         ),
       );
     }
-    tmux.run(cmd.replace(/\n/g, ' ; '), (err, lines) => {
+    tmux.runLine(cmd.replace(/\n/g, ' ; '), (err, lines) => {
       if (err) send({ t: 'notice', text: err.message, kind: 'bad' });
       else if (lines.length) send({ t: 'notice', text: lines.join('\n') });
     });
@@ -350,11 +361,14 @@ function bridge(ws, { session, cols, rows, commit = '', onStop = () => {}, first
     tmux.runList([`list-windows -F ${quote(WINDOW_FORMAT)}`, `list-panes -s -F ${quote(PANE_FORMAT)}`], ([w, p]) => {
       if (w.err || p.err) return;
       const windows = w.lines.filter(Boolean).map((l) => {
-        const [id, index, active, layout, dtmuxId, ...name] = l.split('\t');
+        let [id, index, active, layout, uid, ...name] = l.split('\t');
         // Every window gets a long unique id the first time we see it, so a
         // saved window can be told apart from any other after a restart.
-        if (!dtmuxId) tmux.run(`set-option -w -t ${id} ${ID_OPTION} ${newWindowId()}`);
-        return { id, index: Number(index), active: active === '1', layout, name: name.join('\t') };
+        if (!uid) {
+          uid = newWindowId();
+          tmux.run(`set-option -w -t ${id} ${ID_OPTION} ${uid}`);
+        }
+        return { id, uid, index: Number(index), active: active === '1', layout, name: name.join('\t') };
       });
       const list = p.lines.filter(Boolean).map((l) => {
         const [id, window, active, width, height, cmd] = l.split('\t');
@@ -393,7 +407,7 @@ function bridge(ws, { session, cols, rows, commit = '', onStop = () => {}, first
       ([, modes, screen, saved]) => {
         const pane = panes.get(id);
         if (!pane) return;
-        if (!modes.err)
+        if (!modes.err && modes.lines.length)
           send({
             t: 'init',
             p: id,
@@ -458,8 +472,14 @@ function bridge(ws, { session, cols, rows, commit = '', onStop = () => {}, first
       case 'resume':
         if (typeof msg.id === 'string') resumeSaved(msg.id);
         break;
+      case 'reorder':
+        if (Array.isArray(msg.ws) && msg.ws.length < 1000 && msg.ws.every(isWindowId)) reorder(msg.ws);
+        break;
       case 'stop':
         onStop();
+        break;
+      case 'restart':
+        onRestart();
         break;
     }
   });
@@ -482,9 +502,30 @@ function bridge(ws, { session, cols, rows, commit = '', onStop = () => {}, first
       dir = os.homedir();
     }
     const name = entry.autoName ? '' : ` -n ${quote(entry.name)}`;
-    // One command line, so the id is on the window before anyone lists it.
-    tmux.run(`new-window -c ${quote(dir)}${name} ; set-option -w ${ID_OPTION} ${quote(entry.id)}`, (err) => {
-      if (err) send({ t: 'notice', text: `Could not reopen "${entry.name}": ${err.message}`, kind: 'bad' });
+    // One command list, so the id is on the window before anyone lists it.
+    // runList, not run: tmux answers each command of a list separately.
+    tmux.runList([`new-window -c ${quote(dir)}${name}`, `set-option -w ${ID_OPTION} ${quote(entry.id)}`], ([made]) => {
+      if (made.err) send({ t: 'notice', text: `Could not reopen "${entry.name}": ${made.err.message}`, kind: 'bad' });
+    });
+  }
+
+  // Swap windows until tmux's index order matches the page's tab order, so
+  // prefix + digit and the next stop's saved order follow the tabs.
+  function reorder(wanted) {
+    tmux.run(`list-windows -F ${quote('#{window_id}\t#{window_index}\t#{window_active}')}`, (err, lines) => {
+      if (err) return;
+      const current = lines.filter(Boolean).map((l) => {
+        const [id, index, active] = l.split('\t');
+        return { id, index: Number(index), active: active === '1' };
+      });
+      const swaps = planSwaps(current, wanted);
+      if (!swaps.length) return;
+      // Swapping moves windows between indexes, and the current window is an
+      // index; select the one that was current again.
+      const active = current.find((w) => w.active);
+      const cmds = swaps.map(([a, b]) => `swap-window -d -s ${a} -t ${b}`);
+      if (active) cmds.push(`select-window -t ${active.id}`);
+      tmux.runList(cmds, () => scheduleRefresh());
     });
   }
 
@@ -510,6 +551,31 @@ function bridge(ws, { session, cols, rows, commit = '', onStop = () => {}, first
       tmux.run(`send-keys -H -t ${id} ${hex.join(' ')}`);
     }
   }
+}
+
+// The swap-window pairs that put `current` windows ({ id, index }) into the
+// order of `wanted` (window ids). Windows `wanted` does not name keep their
+// relative order after the named ones; ids tmux does not have are ignored.
+export function planSwaps(current, wanted) {
+  const have = new Set(current.map((w) => w.id));
+  const named = [...new Set(wanted.filter((id) => have.has(id)))];
+  const order = [...named, ...current.filter((w) => !named.includes(w.id)).sort((a, b) => a.index - b.index).map((w) => w.id)];
+  const slots = current.map((w) => w.index).sort((a, b) => a - b);
+  const at = new Map(current.map((w) => [w.index, w.id]));
+  const where = new Map(current.map((w) => [w.id, w.index]));
+  const swaps = [];
+  order.forEach((id, i) => {
+    const slot = slots[i];
+    const other = at.get(slot);
+    if (other === id) return;
+    const from = where.get(id);
+    swaps.push([id, other]);
+    at.set(slot, id);
+    at.set(from, other);
+    where.set(id, slot);
+    where.set(other, from);
+  });
+  return swaps;
 }
 
 // Directory, branch, commit, and dirty flag for the bubble. `dir` is all

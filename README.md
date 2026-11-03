@@ -33,12 +33,13 @@ code 2). If you change the port while dtmux runs, `dtmux` tells you so;
 - dtmux talks to its own tmux server (`tmux -L dtmux`), separate from any tmux
   you run by hand. It still reads your `~/.tmux.conf`. To look at its sessions
   from a shell, run `tmux -L dtmux ls`.
-- `dtmux kill`, a plain `kill <pid>` (SIGTERM, or SIGINT), or the red Stop
+- `dtmux kill`, a plain `kill <pid>` (SIGTERM, or SIGINT), or the Restart
   button in the page first saves every tmux window of every session (name,
   directory, tab order, and a long unique id kept in the window option
   `@dtmux_id`), then closes the browser connections, runs
   `tmux -L dtmux kill-server` (the shells in its panes get SIGHUP), removes the
-  pid file and exits.
+  pid file and exits. The Restart button then starts a new daemon on the same
+  port, running the code as it is on disk; open pages reconnect by themselves.
 - The next `dtmux` reopens nothing by itself. The saved windows show up as
   dotted tabs. Clicking one opens a new window with that name, in that
   directory. While saved windows exist and the session does not, opening the
@@ -48,6 +49,10 @@ code 2). If you change the port while dtmux runs, `dtmux` tells you so;
   across later restarts. A live window that looks exactly like a saved one
   (same name, directory and naming) takes its place, so the shell tmux opens
   to start a session does not pile up copies.
+- Tabs, dotted ones included, can be dragged to reorder them. The order is
+  remembered in the browser, and tmux renumbers its windows to match, so
+  prefix + digit follows the tabs. A tapped dotted tab opens in its own slot,
+  and tabs stay put while the page reconnects or dtmux restarts.
 - While the daemon is away, the page reconnects by itself three times a second
   and shows the command that starts it again.
 - When Claude, Codex or the Cursor agent prints its resume command, a bubble

@@ -65,8 +65,9 @@ function resolveStatic(pathname) {
 }
 
 // Resolves with the listening server once it is bound to `port`.
-// `onStop` runs when a page asks the daemon to stop (the Stop button).
-export function startServer({ port, onStop = () => {} }) {
+// `onStop` runs when a page asks the daemon to stop, `onRestart` when it asks
+// for a restart (the Restart button).
+export function startServer({ port, onStop = () => {}, onRestart = () => {} }) {
   const server = http.createServer((req, res) => {
     const pathname = new URL(req.url, `http://${req.headers.host}`).pathname;
     if (pathname === HEALTH_PATH) {
@@ -119,11 +120,21 @@ export function startServer({ port, onStop = () => {} }) {
       ws.close(1008, 'bad session name');
       return;
     }
-    attachTmuxSession(ws, { session, cols, rows, commit: readCommit(), onStop });
+    attachTmuxSession(ws, { session, cols, rows, commit: readCommit(), onStop, onRestart });
   });
 
   return new Promise((resolve, reject) => {
-    server.once('error', reject);
-    server.listen(port, HOST, () => resolve({ server, wss }));
+    // The WebSocket server re-emits the HTTP server's listen error; that is
+    // this promise's rejection, not a crash.
+    const fail = (err) => {
+      wss.close();
+      reject(err);
+    };
+    wss.once('error', () => {});
+    server.once('error', fail);
+    server.listen(port, HOST, () => {
+      server.off('error', fail);
+      resolve({ server, wss });
+    });
   });
 }

@@ -46,6 +46,14 @@ body {
   align-items: center;
   gap: 6px;
 }
+#toolbar-left {
+  flex: 1;
+  min-width: 0;
+}
+#toolbar-right {
+  flex-shrink: 0;
+  padding-left: 12px;
+}
 
 #toolbar button {
   background: transparent;
@@ -101,6 +109,24 @@ body {
 .tabs {
   display: flex;
   gap: 4px;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.tabs::-webkit-scrollbar {
+  display: none;
+}
+/* Same box in every state (live, active, saved, reopening), so a tab never
+   changes size and the ones after it never move. */
+#toolbar .tabs button {
+  flex-shrink: 0;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border-width: 1px;
+  touch-action: none; /* a finger drags the tab instead of scrolling the page */
+  color: #bbb;
 }
 #toolbar .tabs button.active {
   border-color: var(--accent);
@@ -110,23 +136,43 @@ body {
 /* A window saved when dtmux stopped, not reopened yet. */
 #toolbar .tabs button.saved {
   border-style: dashed;
-  border-color: #777;
-  color: #999;
+  border-color: #666;
+  color: #888;
 }
 #toolbar .tabs button.saved:hover {
   border-color: var(--accent);
   color: var(--fg);
 }
-#toolbar button.stop {
-  background: var(--bad);
-  border-color: var(--bad);
-  color: #fff;
-  font-weight: 700;
-  padding: 3px 16px;
+/* Tapped, waiting for its window. */
+#toolbar .tabs button.saved.pending {
+  border-color: var(--accent);
+  color: var(--fg);
+  cursor: progress;
+  animation: tab-pending 0.9s ease-in-out infinite alternate;
 }
-#toolbar button.stop:hover {
-  background: #e4605c;
-  border-color: #fff;
+@keyframes tab-pending {
+  to {
+    border-color: #666;
+  }
+}
+#toolbar .tabs button.dragging {
+  position: relative;
+  z-index: 1;
+  background: #3a3a3a;
+  border-color: var(--accent);
+  cursor: grabbing;
+  box-shadow: 0 2px 8px #0008;
+}
+/* (Re)connecting: the old tabs keep their places until fresh ones arrive. */
+.tabs.offline {
+  opacity: 0.45;
+  pointer-events: none;
+}
+#toolbar button.restart {
+  color: #bbb;
+}
+#toolbar button.restart:hover {
+  color: var(--fg);
 }
 
 /* tmux mode: one positioned box per pane, one layer per window. */
@@ -188,6 +234,10 @@ body {
   color: #aaa;
   font-size: 15px;
 }
+.tmux-overlay.idle {
+  color: #888;
+  font-size: 14px;
+}
 .tmux-overlay p {
   margin: 0;
   max-width: calc(100% - 32px);
@@ -229,6 +279,15 @@ body {
   font: inherit;
   font-weight: 600;
   cursor: pointer;
+}
+.tmux-overlay button.secondary {
+  background: transparent;
+  color: var(--fg);
+  border: 1px solid var(--bar-border);
+  font-weight: 400;
+}
+.tmux-overlay button.secondary:hover {
+  border-color: var(--accent);
 }
 .tmux-overlay button:focus-visible {
   outline: 2px solid #fff;

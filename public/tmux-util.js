@@ -162,3 +162,22 @@ export function tmuxKeyName(e) {
   if (e.ctrlKey) name = `C-${name}`;
   return name;
 }
+
+// The toolbar's tab order. `items` are the tabs to show ({ key, ... }), in
+// their natural order (live windows by index, then saved ones). Keys `order`
+// knows keep their place in it; new keys go last. Keys not shown now stay in
+// the returned order, so a window that comes back (reopened, or saved again
+// by a restart) lands where it was. The order keeps at most `cap` keys.
+export function orderTabs(order, items, cap = 500) {
+  const pos = new Map(order.map((k, i) => [k, i]));
+  const known = items.filter((it) => pos.has(it.key)).sort((a, b) => pos.get(a.key) - pos.get(b.key));
+  const fresh = items.filter((it) => !pos.has(it.key));
+  let next = [...order, ...fresh.map((it) => it.key)];
+  if (next.length > cap) {
+    const shown = new Set(items.map((it) => it.key));
+    const spare = next.length - cap;
+    let dropped = 0;
+    next = next.filter((k) => shown.has(k) || ++dropped > spare);
+  }
+  return { tabs: [...known, ...fresh], order: next };
+}

@@ -8,7 +8,7 @@
 // tmux prefix key is the exception: prefix sequences go through tmux's own
 // key bindings, so splits, new windows and the rest keep working.
 import { createTerminal, leaveQueriesToTmux, base64ToBytes, socketUrl } from './terminal-common.js';
-import { parseLayout, paneBorders, tmuxKeyName, windowSwitchDirection } from './tmux-util.js';
+import { orderTabs, parseLayout, paneBorders, tmuxKeyName, windowSwitchDirection } from './tmux-util.js';
 
 export function startTmuxMode({ container, toolbar, params }) {
   const stage = document.createElement('div');
@@ -23,8 +23,19 @@ export function startTmuxMode({ container, toolbar, params }) {
   let ended = false; // the server said goodbye; the socket closing is expected
   let sessionName = params.get('session') || 'dtmux';
   let activeWindow = null;
-  let windowOrder = []; // toolbar tabs, left to right
-  let savedWindows = []; // saved when dtmux last stopped; dotted tabs until reopened
+  // Toolbar tabs. Live windows, and windows saved when dtmux last stopped
+  // (dotted until tapped, which reopens them). A tapped one is pending until
+  // its window shows up, and keeps its place meanwhile. Tabs are keyed by the
+  // window's long id, which a saved window keeps when reopened, and ordered by
+  // `tabOrder`: the user's drag-and-drop order, remembered in this browser.
+  let liveWindows = [];
+  let savedWindows = [];
+  const pending = new Map(); // long id -> saved window, tapped, not live yet
+  let haveState = false; // false while (re)connecting: the old tabs stay put, dimmed
+  let draggingTab = false;
+  const ORDER_KEY = `dtmux.tabOrder.${params.get('session') || ''}`;
+  let tabOrder = loadOrder();
+  const tabEls = new Map(); // key -> button
   let activePane = null;
   let prefix = null; // tmux key name, e.g. "C-a"
   let prefixArmed = false;
@@ -46,13 +57,16 @@ export function startTmuxMode({ container, toolbar, params }) {
     if (params.get('session')) query.session = params.get('session');
     ws = new WebSocket(socketUrl(query));
     ws.onopen = () => {
-      if (retry) stage.querySelector('.tmux-overlay')?.remove();
+      if (retry) {
+        clearTimeout(retry.overlayTimer);
+        stage.querySelector('.tmux-overlay')?.remove();
+      }
       retry = null;
-      stopButton.disabled = false; // "+" waits for hello: an idle page has no session yet
+      restartButton.disabled = false; // "+" waits for hello: an idle page has no session yet
       toolbar.setStatus('connected', 'ok');
     };
     ws.onclose = (ev) => {
-      if (!ended) retryConnect(ev.reason === 'dtmux stopping');
+      if (!ended) retryConnect(ev.reason);
     };
     ws.onerror = () => {
       if (!retry) toolbar.setStatus('error', 'bad');
@@ -92,7 +106,7 @@ export function startTmuxMode({ container, toolbar, params }) {
           break;
         case 'saved':
           savedWindows = Array.isArray(msg.windows) ? msg.windows : [];
-          renderTabs(windowOrder);
+          renderTabs();
           break;
         case 'exit':
           ended = true;
@@ -103,21 +117,36 @@ export function startTmuxMode({ container, toolbar, params }) {
     };
   }
 
-  // The daemon went away (stopped, restarting, crashed): drop the dead panes,
-  // keep retrying on our own, and say how to start the daemon again.
-  function retryConnect(stopped = false) {
+  // The daemon went away (restarting, stopped, crashed): drop the dead panes,
+  // keep the tabs where they are, dimmed, and keep retrying on our own. Only
+  // if that takes a while, say how to start the daemon again; a restart is
+  // usually back before then.
+  const OVERLAY_DELAY_MS = 1500;
+  function retryConnect(reason) {
     if (!retry) {
       resetView();
       newWindowButton.disabled = true;
-      stopButton.disabled = true;
-      toolbar.setStatus(stopped ? 'stopped' : 'reconnecting…', 'bad');
+      restartButton.disabled = true;
+      const restarting = reason === 'dtmux restarting';
+      const stopped = reason === 'dtmux stopping';
+      toolbar.setStatus(restarting ? 'restarting…' : stopped ? 'stopped' : 'reconnecting…', restarting ? '' : 'bad');
+      retry = { tries: 0, countEl: document.createElement('p') };
+      retry.overlayTimer = setTimeout(() => showRetryOverlay(stopped || restarting), restarting ? OVERLAY_DELAY_MS * 2 : OVERLAY_DELAY_MS);
+    }
+    retry.tries++;
+    retry.countEl.textContent = `attempt ${retry.tries}`;
+    setTimeout(connect, RETRY_MS);
+  }
+  function showRetryOverlay(stopped) {
+    if (!retry) return;
+    {
+      const { countEl } = retry;
       const box = document.createElement('div');
       box.className = 'tmux-overlay';
       const lost = document.createElement('p');
       lost.textContent = stopped
-        ? 'dtmux was stopped. Its windows are saved and come back as dotted tabs once it runs again. Reconnecting by itself, three times a second.'
+        ? 'dtmux is not running. Its windows are saved and come back as dotted tabs once it runs again. Reconnecting by itself, three times a second.'
         : 'Lost the connection to the dtmux daemon. Reconnecting by itself, three times a second.';
-      const countEl = document.createElement('p');
       countEl.className = 'muted';
       const hint = document.createElement('p');
       hint.textContent = 'If the daemon is stopped, start it again:';
@@ -139,11 +168,7 @@ export function startTmuxMode({ container, toolbar, params }) {
       cmd.append(code, copy);
       box.append(lost, countEl, hint, cmd);
       stage.append(box);
-      retry = { tries: 0, countEl };
     }
-    retry.tries++;
-    retry.countEl.textContent = `attempt ${retry.tries}`;
-    setTimeout(connect, RETRY_MS);
   }
 
   // The session does not exist, but windows were saved when dtmux stopped:
@@ -153,12 +178,16 @@ export function startTmuxMode({ container, toolbar, params }) {
     sessionName = session;
     newWindowButton.disabled = true;
     toolbar.setStatus(params.get('session') ? `dtmux · ${session}` : 'dtmux', 'brand');
+    haveState = true;
+    renderTabs();
+    stage.querySelector('.tmux-overlay.idle')?.remove();
     const box = document.createElement('div');
     box.className = 'tmux-overlay idle';
     const p = document.createElement('p');
-    p.textContent = 'Windows saved when dtmux stopped are in the top bar. Click one to reopen it in its directory.';
+    p.textContent = 'Tap a dotted tab to reopen it in its directory.';
     const btn = document.createElement('button');
-    btn.textContent = 'Start new session';
+    btn.className = 'secondary';
+    btn.textContent = 'Start an empty session';
     btn.addEventListener('click', () => {
       btn.disabled = true;
       send({ t: 'new-session' });
@@ -172,7 +201,7 @@ export function startTmuxMode({ container, toolbar, params }) {
   function showEnded(status, text, label) {
     resetView();
     newWindowButton.disabled = true;
-    stopButton.disabled = true;
+    restartButton.disabled = true;
     toolbar.setStatus(status, 'bad');
     const box = document.createElement('div');
     box.className = 'tmux-overlay';
@@ -198,9 +227,12 @@ export function startTmuxMode({ container, toolbar, params }) {
     stage.querySelector('.tmux-overlay')?.remove();
     closePrompt?.(null);
     for (const el of stage.querySelectorAll('.tmux-notice, .tmux-journal')) el.remove();
-    toolbar.tabs.replaceChildren();
-    windowOrder = [];
+    // The tabs stay, dimmed, until the next state replaces them in place.
+    haveState = false;
+    toolbar.tabs.classList.add('offline');
+    liveWindows = [];
     savedWindows = [];
+    pending.clear();
     activeWindow = null;
     activePane = null;
     swallowedKeyUps.clear();
@@ -324,9 +356,9 @@ export function startTmuxMode({ container, toolbar, params }) {
     const layout = new Map();
     for (const w of windows) for (const leaf of parseLayout(w.layout)) layout.set(leaf.id, leaf);
 
-    const liveWindows = new Set(windows.map((w) => w.id));
+    const liveIds = new Set(windows.map((w) => w.id));
     for (const [id, el] of windowEls) {
-      if (!liveWindows.has(id)) {
+      if (!liveIds.has(id)) {
         el.remove();
         windowEls.delete(id);
       }
@@ -371,7 +403,9 @@ export function startTmuxMode({ container, toolbar, params }) {
     const win = windows.find((w) => w.active);
     const pane = win && list.find((p) => p.window === win.id && p.active);
     for (const info of list) panes.get(info.id)?.el.classList.toggle('active', info.active);
-    renderTabs(windows);
+    liveWindows = windows;
+    haveState = true;
+    renderTabs();
     if (pane && (pane.id !== activePane || win.id !== activeWindow)) {
       activeWindow = win.id;
       activePane = pane.id;
@@ -478,41 +512,188 @@ export function startTmuxMode({ container, toolbar, params }) {
     document.addEventListener('mouseup', up, true);
   }
 
-  function renderTabs(windows) {
-    windowOrder = windows;
-    toolbar.tabs.replaceChildren(
-      ...windows.map((w) => {
-        const b = document.createElement('button');
-        b.textContent = `${w.index}:${w.name}`;
-        b.className = w.active ? 'active' : '';
-        b.title = `Switch to tmux window ${w.index}`;
-        b.addEventListener('click', () => {
-          send({ t: 'select-window', w: w.id });
-          panes.get(activePane)?.term.focus();
-        });
-        return b;
-      }),
-      // Saved windows: dotted until clicked, which reopens them here.
-      ...savedWindows.map((w) => {
-        const b = document.createElement('button');
-        b.textContent = w.name;
-        b.className = 'saved';
-        b.title = `Saved when dtmux stopped: ${w.dir}\nClick to reopen it there.`;
-        b.addEventListener('click', () => {
-          b.disabled = true;
-          send({ t: 'resume', id: w.id });
-        });
-        return b;
-      }),
-    );
+  function loadOrder() {
+    try {
+      const v = JSON.parse(localStorage.getItem(ORDER_KEY));
+      return Array.isArray(v) ? v.filter((k) => typeof k === 'string') : [];
+    } catch {
+      return [];
+    }
+  }
+  function saveOrder() {
+    try {
+      localStorage.setItem(ORDER_KEY, JSON.stringify(tabOrder));
+    } catch {}
+  }
+  // Another page of this browser reordered the tabs.
+  window.addEventListener('storage', (e) => {
+    if (e.key !== ORDER_KEY) return;
+    tabOrder = loadOrder();
+    renderTabs();
+  });
+
+  // Every tab, in toolbar order: { key, kind: 'live' | 'saved' | 'pending', w }.
+  function currentTabs() {
+    const live = new Set(liveWindows.map((w) => w.uid));
+    for (const uid of pending.keys()) if (live.has(uid)) pending.delete(uid);
+    const saved = new Set(savedWindows.map((w) => w.id));
+    const items = [
+      ...[...liveWindows].sort((a, b) => a.index - b.index).map((w) => ({ key: w.uid || w.id, kind: 'live', w })),
+      ...savedWindows.filter((w) => !live.has(w.id)).map((w) => ({ key: w.id, kind: pending.has(w.id) ? 'pending' : 'saved', w })),
+      ...[...pending].filter(([uid]) => !saved.has(uid)).map(([uid, w]) => ({ key: uid, kind: 'pending', w })),
+    ];
+    const { tabs, order } = orderTabs(tabOrder, items);
+    if (order.length !== tabOrder.length) {
+      tabOrder = order;
+      saveOrder();
+    }
+    return tabs;
+  }
+
+  // Tabs are updated in place, never rebuilt, so nothing under the pointer
+  // moves or loses its press when a state arrives.
+  let tabItems = new Map(); // key -> current tab item
+  function renderTabs() {
+    if (!haveState || draggingTab) return;
+    toolbar.tabs.classList.remove('offline');
+    const tabs = currentTabs();
+    const landed = tabs.some((t) => t.kind === 'live' && tabItems.get(t.key)?.kind === 'pending');
+    tabItems = new Map(tabs.map((t) => [t.key, t]));
+    for (const [key, el] of tabEls) {
+      if (!tabItems.has(key)) {
+        el.remove();
+        tabEls.delete(key);
+      }
+    }
+    let prev = null;
+    for (const t of tabs) {
+      let el = tabEls.get(t.key);
+      if (!el) {
+        el = tabButton(t.key);
+        tabEls.set(t.key, el);
+      }
+      const label = t.w.name;
+      if (el.textContent !== label) el.textContent = label;
+      el.className = t.kind === 'live' ? (t.w.active ? 'active' : '') : t.kind === 'pending' ? 'saved pending' : 'saved';
+      el.title =
+        t.kind === 'live'
+          ? `tmux window ${t.w.index}: ${t.w.name}\nDrag to reorder.`
+          : t.kind === 'pending'
+            ? `Reopening in ${t.w.dir}…`
+            : `Saved when dtmux stopped: ${t.w.dir}\nTap to reopen it there. Drag to reorder.`;
+      const want = prev ? prev.nextSibling : toolbar.tabs.firstChild;
+      if (want !== el) toolbar.tabs.insertBefore(el, want);
+      prev = el;
+    }
+    // A reopened window joins tmux's list last; move it to its tab's place.
+    if (landed) syncTmuxOrder();
+  }
+
+  function tabButton(key) {
+    const b = document.createElement('button');
+    b.dataset.key = key;
+    b.addEventListener('pointerdown', (e) => startTabDrag(e, b));
+    b.addEventListener('click', () => {
+      const t = tabItems.get(key);
+      if (!t || !haveState) return;
+      if (t.kind === 'live') {
+        send({ t: 'select-window', w: t.w.id });
+        panes.get(activePane)?.term.focus();
+      } else if (t.kind === 'saved') {
+        pending.set(key, t.w);
+        setTimeout(() => {
+          if (pending.delete(key)) renderTabs(); // it never came: show it as saved again
+        }, 10000);
+        send({ t: 'resume', id: key });
+        renderTabs();
+      }
+    });
+    return b;
+  }
+
+  // Drag a tab along the strip to move it. Pointer events, so it works with a
+  // mouse, a pen or a finger. The tab follows the pointer; the others make room.
+  // The tab moves in the DOM as it passes its neighbours, which drops any
+  // pointer capture, so the drag listens on the window instead, and ends on
+  // release, cancel or the window losing focus, wherever the pointer is then.
+  function startTabDrag(e, el) {
+    if (e.button !== 0 || !haveState || draggingTab) return;
+    const strip = toolbar.tabs;
+    const id = e.pointerId;
+    const startX = e.clientX;
+    const startLeft = el.offsetLeft;
+    let moved = false;
+    const move = (ev) => {
+      if (ev.pointerId !== id) return;
+      const dx = ev.clientX - startX;
+      if (!moved) {
+        if (Math.abs(dx) < 5) return;
+        moved = true;
+        draggingTab = true;
+        el.classList.add('dragging');
+      }
+      ev.preventDefault();
+      ev.stopPropagation(); // the panes underneath see nothing of the drag
+      const center = startLeft + dx + el.offsetWidth / 2;
+      const before = [...strip.children].find((c) => c !== el && c.offsetLeft + c.offsetWidth / 2 > center) ?? null;
+      if (el.nextSibling !== before && el !== before) strip.insertBefore(el, before);
+      el.style.transform = `translateX(${startLeft + dx - el.offsetLeft}px)`;
+    };
+    const up = (ev) => {
+      if (ev.pointerId === id) done();
+    };
+    const done = () => {
+      window.removeEventListener('pointermove', move, true);
+      window.removeEventListener('pointerup', up, true);
+      window.removeEventListener('pointercancel', up, true);
+      window.removeEventListener('blur', done);
+      if (!moved) return;
+      // The click that may follow is the drop, not a tap.
+      const eat = (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+      };
+      window.addEventListener('click', eat, true);
+      setTimeout(() => window.removeEventListener('click', eat, true), 0);
+      el.classList.remove('dragging');
+      el.style.transform = '';
+      draggingTab = false;
+      const keys = [...strip.children].map((c) => c.dataset.key);
+      const shown = new Set(keys);
+      tabOrder = [...keys, ...tabOrder.filter((k) => !shown.has(k))];
+      saveOrder();
+      syncTmuxOrder();
+      renderTabs();
+      panes.get(activePane)?.term.focus();
+    };
+    window.addEventListener('pointermove', move, true);
+    window.addEventListener('pointerup', up, true);
+    window.addEventListener('pointercancel', up, true);
+    window.addEventListener('blur', done);
+  }
+
+  // Live windows in toolbar order.
+  function liveInTabOrder() {
+    const pos = new Map(tabOrder.map((k, i) => [k, i]));
+    const at = (w) => pos.get(w.uid || w.id) ?? Infinity;
+    return [...liveWindows].sort((a, b) => at(a) - at(b) || a.index - b.index);
+  }
+
+  // Ask tmux to number its windows in toolbar order, so prefix + digit and the
+  // order saved on the next restart match what the toolbar shows.
+  function syncTmuxOrder() {
+    const want = liveInTabOrder().map((w) => w.id);
+    const now = [...liveWindows].sort((a, b) => a.index - b.index).map((w) => w.id);
+    if (want.join() !== now.join()) send({ t: 'reorder', ws: want });
   }
 
   // Page's own tab switch. Caught before any pane, so the program there never
   // sees Ctrl+PageUp / Ctrl+PageDown.
   function switchWindow(dir) {
-    if (windowOrder.length < 2) return;
-    const i = windowOrder.findIndex((w) => w.id === activeWindow);
-    const next = windowOrder[(i + dir + windowOrder.length) % windowOrder.length];
+    const order = liveInTabOrder();
+    if (order.length < 2) return;
+    const i = order.findIndex((w) => w.id === activeWindow);
+    const next = order[(i + dir + order.length) % order.length];
     if (!next || next.id === activeWindow) return;
     send({ t: 'select-window', w: next.id });
   }
@@ -577,18 +758,29 @@ export function startTmuxMode({ container, toolbar, params }) {
     title: 'New tmux window',
   });
 
-  const stopButton = toolbar.addButton(
-    'Stop',
+  const restartButton = toolbar.addButton(
+    '↻ Restart',
     () => {
       const ok = confirm(
-        'Stop dtmux?\n\nEvery shell and program in it ends. The windows are saved and show up as dotted tabs after you start dtmux again.',
+        'Restart dtmux?\n\nEvery shell and program in it ends. The windows are saved and come back as dotted tabs: tap one to reopen it.',
       );
-      if (ok) send({ t: 'stop' });
+      if (!ok) return;
+      const asked = ws;
+      send({ t: 'restart' });
+      // A daemon started before the Restart button existed ignores it, while
+      // this page, read fresh from disk, already has the button.
+      setTimeout(() => {
+        if (ws === asked && ws.readyState === WebSocket.OPEN)
+          showNotice(
+            `This dtmux daemon is older than this page and cannot restart itself. Run once in a terminal:\n${document.getElementById('status').dataset.startCmd || 'dtmux'} kill && ${document.getElementById('status').dataset.startCmd || 'dtmux'}`,
+            'bad',
+          );
+      }, 3000);
     },
-    { title: 'Stop the dtmux daemon and its tmux, saving the windows for later' },
+    { title: 'Restart dtmux with the code on disk now; the windows are saved as dotted tabs' },
   );
-  stopButton.classList.add('stop');
-  stopButton.disabled = true;
+  restartButton.classList.add('restart');
+  restartButton.disabled = true;
 
   connect();
   window.tmuxPanes = panes; // for debugging from the console
