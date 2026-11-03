@@ -85,24 +85,24 @@ remotes:
   devbox accounts are deleted after 24 hours with no change in their home,
   so a connected tab touches `~/.dtmux-alive` there every 30 minutes. A tab
   whose machine is gone says so and offers to make a new one.
-- **Closing for good deletes the machine.** Right-click a tab:
-  **Disconnect** keeps the machine and leaves a dotted tab that joins it
-  again; **Close and delete the VM / account…** (on a dotted tab: **Forget
-  and delete…**) asks, then deletes the machine and the tab. It works on a
-  stuck tab too, from outside.
+- **Delete, not close.** A remote tab has no Close: right-click it for
+  **Delete the VM / account…** (live or dotted), which asks, then deletes
+  the machine, and the tab goes with it. It works on a stuck tab too.
+  **Disconnect** keeps the machine, with a dotted tab to join it again.
+- **Ctrl+D deletes.** When the last shell on the machine exits (its tmux
+  ends), the machine is deleted and the tab closes. If the machine's tmux was
+  only detached, or cannot be asked, nothing is deleted: the tab stays with
+  **Reconnect** and **Delete the VM… / account…** (the terminal takes Enter
+  and `d` for the same), as it does when the connection is down and you
+  press Ctrl+C. The page hears of it at once through a tmux format
+  subscription on the window option `@dtmux_remote_state`.
 - **No machine is left behind.** Every machine dtmux makes is recorded in
   `~/.dtmux/machines.json` the moment its name is known (a tab closed while
   its machine is still being made records it all the same). Every 2 minutes
   the daemon deletes recorded machines that no tab, live or dotted, stands
-  for in two checks in a row: tabs that went without Close (tmux's own
+  for in two checks in a row: tabs that went without Delete (tmux's own
   kill-window, a crashed helper) take their machine with them too. Machines
   dtmux did not make are never touched.
-- **When the session there ends** (its last shell exits, or its tmux is
-  detached), or the connection is down and you press Ctrl+C, the tab stays,
-  since the machine still runs: it shows **Reconnect** and **Close and
-  delete…** (the terminal takes Enter and `d` for the same). The page hears
-  of it at once through a tmux format subscription on the window option
-  `@dtmux_remote_state`.
 - **Uptime.** A tab's tooltip counts from when its machine was ready, not
   from when the tab opened.
 - Host keys go to `~/.dtmux/known_hosts`, not your own: VM addresses are

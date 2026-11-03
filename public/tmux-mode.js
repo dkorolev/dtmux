@@ -535,8 +535,9 @@ export function startTmuxMode({ container, toolbar, params }) {
     }
   }
 
-  // A remote tab whose session there has ended: the machine still runs, so
-  // the tab stays with a choice, as buttons (the terminal offers the same
+  // A remote tab not connected to its machine's tmux (detached there, or
+  // the connection down and Ctrl+C pressed): the machine still runs, so the
+  // tab stays with a choice, as buttons (the terminal offers the same
   // as keys, which is what the buttons press).
   function renderEnded(w, winEl, pane) {
     let box = winEl.querySelector(':scope > .remote-ended');
@@ -549,7 +550,7 @@ export function startTmuxMode({ container, toolbar, params }) {
     box.dataset.host = w.remote.host;
     box.style.setProperty('--remote', r.color);
     const title = document.createElement('strong');
-    title.textContent = `The session on ${r.label} ${r.noun} ${w.remote.host} has ended`;
+    title.textContent = `Not connected to ${r.label} ${r.noun} ${w.remote.host}`;
     const info = document.createElement('div');
     info.textContent = `The ${r.noun} is still there (${r.lifetime}).`;
     const row = document.createElement('div');
@@ -562,7 +563,7 @@ export function startTmuxMode({ container, toolbar, params }) {
       row.append(b);
     };
     button('Reconnect', 'primary', () => send({ t: 'in', p: pane.id, d: '\r' }));
-    button(`Close and delete the ${r.noun}…`, 'danger', () => {
+    button(`Delete the ${r.noun}…`, 'danger', () => {
       if (confirm(`Delete ${r.label} ${r.noun} ${w.remote.host} for good?\n\nEverything on it is lost, and this tab closes.`))
         send({ t: 'close', w: w.id });
     });
@@ -968,7 +969,7 @@ export function startTmuxMode({ container, toolbar, params }) {
               },
             ],
             t.w.remote
-              ? closeRemoteItem(t, 'Close')
+              ? deleteRemoteItem(t)
               : [
                   'Close',
                   'Close this window for good, ending what runs in it; no dotted tab is kept',
@@ -984,23 +985,23 @@ export function startTmuxMode({ container, toolbar, params }) {
               t.w.remote ? `Join ${t.w.remote.host} again` : `Start it again in ${t.w.dir}`,
               () => tabEls.get(key)?.click(),
             ],
-            t.w.remote ? closeRemoteItem(t, 'Forget') : ['Forget', 'Remove this dotted tab for good', () => send({ t: 'forget', id: key })],
+            t.w.remote ? deleteRemoteItem(t) : ['Forget', 'Remove this dotted tab for good', () => send({ t: 'forget', id: key })],
           ],
       x,
       y,
     );
   }
 
-  // A remote tab closed for good (Close on a live one, Forget on a dotted
-  // one) takes its machine with it, after asking; Disconnect keeps it.
-  function closeRemoteItem(t, verb) {
+  // A remote tab has no Close: a tab gone for good takes its machine with
+  // it, so the one item says so. Asks first.
+  function deleteRemoteItem(t) {
     const r = remoteOf(t.w);
     const what = `${r.label} ${r.noun} ${t.w.remote.host}`;
     return [
-      `${verb} and delete the ${r.noun}…`,
-      `Delete ${what} and remove this tab for good (Disconnect keeps the ${r.noun})`,
+      `Delete the ${r.noun}…`,
+      `Delete ${what}; this tab goes with it`,
       () => {
-        if (confirm(`Delete ${what} for good?\n\nEverything on it is lost, and this tab goes away. (Disconnect keeps the ${r.noun}.)`))
+        if (confirm(`Delete ${what} for good?\n\nEverything on it is lost, and this tab goes away.`))
           send(t.kind === 'live' ? { t: 'close', w: t.w.id } : { t: 'forget', id: t.key });
       },
       '#ff6b6b',

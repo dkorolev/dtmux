@@ -179,9 +179,17 @@ async function connect(address, fresh, { probe = false } = {}) {
       process.off('SIGINT', keep);
       clearTimeout(first);
       if (code !== 255) {
-        // The session there ended (its last shell exited, or it was detached).
-        // The tab stays, so the machine is not forgotten while it still runs.
-        const next = await ended(`The session on ${remote.label} ${kind.noun} ${host} has ended`);
+        // ssh came back on its own: the machine's tmux either ended (its last
+        // shell exited, Ctrl+D) or was only detached. Ended: the machine has
+        // nothing left to do, so it is deleted and the tab closes. Detached,
+        // or not sure: it stays, and you choose.
+        const alive = await remoteTmux(base);
+        if (alive === false) {
+          say(`The last shell on ${remote.label} ${kind.noun} ${host} exited.`);
+          if (await removeMachine()) return;
+        }
+        const why = alive ? `The session on ${remote.label} ${kind.noun} ${host} was detached` : `ssh to ${host} ended`;
+        const next = await ended(why);
         if (next === 'reconnect') {
           tries = 0;
           continue;
@@ -220,35 +228,53 @@ async function connect(address, fresh, { probe = false } = {}) {
   }
 }
 
-// The session on the machine has ended, or the connection is down and you
-// pressed Ctrl+C: reconnect (Enter) or delete the machine and close the tab
-// (d). There is no closing the tab while keeping the machine here: that is
-// the tab menu's Disconnect, which keeps a dotted tab to join it again. The
-// page shows the same choices as buttons on the tab (see the window option).
+// The machine's tmux was detached (or could not be asked), or the
+// connection is down and you pressed Ctrl+C: reconnect (Enter) or delete the
+// machine, which closes the tab (d). The page shows the same choices as
+// buttons on the tab (see the window option).
 async function ended(why) {
   tmux('set-option', '-w', '@dtmux_remote_state', 'ended');
   try {
     for (;;) {
       say(`${why}; the ${kind.noun} is still there (${kind.lifetime(remote)}).`);
-      const key = await askKey(`Enter: reconnect · d: delete the ${kind.noun} and close this tab · (to keep it and close the tab: Disconnect in the tab menu)`, ['\r', '\n', 'd', 'D']);
+      const key = await askKey(`Enter: reconnect · d: delete the ${kind.noun} (and this tab)`, ['\r', '\n', 'd', 'D']);
       if (key === null) return 'close';
       if (key === '\r' || key === '\n') return 'reconnect';
-      say(`Deleting ${host}…`);
-      try {
-        await kind.remove(remote, host);
-        try {
-          dropMachine(name, host);
-        } catch {} // the daemon's sweep drops it once it sees the machine gone
-        say(`Deleted ${remote.label} ${kind.noun} ${host}.`);
-        await sleep(1500);
-        return 'deleted';
-      } catch (e) {
-        warn(`Could not delete ${host}: ${e.message}`);
-      }
+      if (await removeMachine()) return 'deleted';
     }
   } finally {
     tmux('set-option', '-wu', '@dtmux_remote_state');
   }
+}
+
+// Delete this tab's machine; true when it is gone. The tab closes when the
+// helper exits after this.
+async function removeMachine() {
+  say(`Deleting ${remote.label} ${kind.noun} ${host}…`);
+  try {
+    await kind.remove(remote, host);
+  } catch (e) {
+    warn(`Could not delete ${host}: ${e.message}`);
+    return false;
+  }
+  try {
+    dropMachine(name, host);
+  } catch {} // the daemon's sweep drops it once it sees the machine gone
+  say(`Deleted ${remote.label} ${kind.noun} ${host}.`);
+  await sleep(1500);
+  return true;
+}
+
+// Does the machine's tmux still run (a session detached, not ended)? true,
+// false, or null when the machine could not be asked.
+function remoteTmux(base) {
+  return new Promise((resolve) => {
+    let out = '';
+    const child = spawn('ssh', [...base, 'tmux ls >/dev/null 2>&1 && echo alive || echo gone'], { stdio: ['ignore', 'pipe', 'ignore'] });
+    child.stdout.on('data', (d) => (out += d));
+    child.on('error', () => resolve(null));
+    child.on('close', () => resolve(/alive/.test(out) ? true : /gone/.test(out) ? false : null));
+  });
 }
 
 // Sleep, cut short by Ctrl+C: resolves true when it was.
