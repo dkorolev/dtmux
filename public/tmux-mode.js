@@ -30,7 +30,7 @@ export function startTmuxMode({ container, toolbar, params }) {
   // `tabOrder`: the user's drag-and-drop order, remembered in this browser.
   let liveWindows = [];
   let savedWindows = [];
-  let remotes = []; // [{ name, label, color, plan, ttlSeconds }] from ~/.dtmux.yaml
+  let remotes = []; // [{ name, label, color, noun, lifetime, paid, plan }] from ~/.dtmux.yaml
   const pending = new Map(); // long id -> saved window, tapped, not live yet
   let haveState = false; // false while (re)connecting: the old tabs stay put, dimmed
   let draggingTab = false;
@@ -110,13 +110,13 @@ export function startTmuxMode({ container, toolbar, params }) {
           showPrompt(msg);
           break;
         case 'notice':
-          showNotice(msg.text, msg.kind);
+          showNotice(msg.text, msg.kind, msg.p);
           break;
         case 'journal':
           showJournal(msg);
           break;
         case 'info':
-          tabInfo.set(msg.w, { panes: msg.panes, at: Date.now() });
+          tabInfo.set(msg.w, { panes: msg.panes, upSince: msg.upSince ?? null, at: Date.now() });
           renderTabs();
           break;
         case 'saved':
@@ -363,7 +363,7 @@ export function startTmuxMode({ container, toolbar, params }) {
     codex: 'Codex resume session journaled',
     cursor: 'Cursor agent resume session journaled',
   };
-  function showJournal({ agent, command, dir, branch, commit, dirty }) {
+  function showJournal({ p, agent, command, dir, branch, commit, dirty }) {
     for (const old of stage.querySelectorAll('.tmux-journal')) old.remove();
     const el = document.createElement('div');
     el.className = 'tmux-journal';
@@ -391,11 +391,21 @@ export function startTmuxMode({ container, toolbar, params }) {
       if (command) navigator.clipboard?.writeText(command).catch(() => {});
       el.remove();
     });
-    stage.append(el);
+    placePopup(el, p);
     setTimeout(() => el.remove(), POPUP_MS);
   }
 
-  function showNotice(text, kind = '') {
+  // A popup about a tab (pane `p`) lives in that tab's window: hidden with
+  // it, and gone once you switch away (see applyState). A brand-new pane may
+  // not be on the page yet; it gets a moment to arrive. Others: on the stage.
+  function placePopup(el, p, tries = 0) {
+    const win = p && panes.get(p)?.el.parentElement;
+    if (win) return win.append(el);
+    if (p && tries < 10) return setTimeout(() => placePopup(el, p, tries + 1), 100);
+    stage.append(el);
+  }
+
+  function showNotice(text, kind = '', p = null) {
     if (!text) return;
     for (const old of stage.querySelectorAll('.tmux-notice')) old.remove();
     const el = document.createElement('div');
@@ -403,7 +413,7 @@ export function startTmuxMode({ container, toolbar, params }) {
     el.textContent = text;
     el.title = 'Click to dismiss';
     el.addEventListener('click', () => el.remove());
-    stage.append(el);
+    placePopup(el, p);
     setTimeout(() => el.remove(), POPUP_MS);
   }
 
@@ -454,6 +464,7 @@ export function startTmuxMode({ container, toolbar, params }) {
     }
 
     for (const w of windows) renderBorders(windowEls.get(w.id), bordersFor(w, list));
+    for (const w of windows) renderEnded(w, windowEls.get(w.id), list.find((p) => p.window === w.id));
 
     const win = windows.find((w) => w.active);
     const pane = win && list.find((p) => p.window === win.id && p.active);
@@ -462,11 +473,50 @@ export function startTmuxMode({ container, toolbar, params }) {
     haveState = true;
     stage.classList.remove('stale');
     renderTabs();
+    // Popups of the tab left behind go with it.
+    if (win && win.id !== activeWindow)
+      for (const [id, el] of windowEls) if (id !== win.id) for (const pop of el.querySelectorAll('.tmux-notice, .tmux-journal')) pop.remove();
     if (pane && (pane.id !== activePane || win.id !== activeWindow)) {
       activeWindow = win.id;
       activePane = pane.id;
       panes.get(pane.id)?.term.focus();
     }
+  }
+
+  // A remote tab whose session there has ended: the machine still runs, so
+  // the tab stays with a choice, as buttons (the terminal offers the same
+  // as keys, which is what the buttons press).
+  function renderEnded(w, winEl, pane) {
+    let box = winEl.querySelector(':scope > .remote-ended');
+    if (!w.remote?.ended || !pane) return box?.remove();
+    const r = remoteOf(w);
+    if (box?.dataset.host === w.remote.host) return;
+    box?.remove();
+    box = document.createElement('div');
+    box.className = 'remote-ended';
+    box.dataset.host = w.remote.host;
+    box.style.setProperty('--remote', r.color);
+    const title = document.createElement('strong');
+    title.textContent = `The session on ${r.label} ${r.noun} ${w.remote.host} has ended`;
+    const info = document.createElement('div');
+    info.textContent = `The ${r.noun} is still there (${r.lifetime}).`;
+    const row = document.createElement('div');
+    row.className = 'buttons';
+    const button = (label, cls, run) => {
+      const b = document.createElement('button');
+      b.textContent = label;
+      b.className = cls;
+      b.addEventListener('click', run);
+      row.append(b);
+    };
+    button('Reconnect', 'primary', () => send({ t: 'in', p: pane.id, d: '\r' }));
+    button(`Delete the ${r.noun}…`, 'danger', () => {
+      if (confirm(`Delete ${r.label} ${r.noun} ${w.remote.host} for good?\n\nEverything on it is lost, and this tab closes.`))
+        send({ t: 'in', p: pane.id, d: 'd' });
+    });
+    button('Close tab', '', () => send({ t: 'close', w: w.id }));
+    box.append(title, info, row);
+    winEl.append(box);
   }
 
   function createPane(info, winEl) {
@@ -643,7 +693,7 @@ export function startTmuxMode({ container, toolbar, params }) {
         t.kind === 'live'
           ? liveTabTitle(t.w)
           : t.kind === 'pending'
-            ? `${t.w.name}\n${t.w.remote ? `Joining ${remoteOf(t.w).label} VM ${t.w.remote.host}…` : `Reopening in ${t.w.dir}…`}`
+            ? `${t.w.name}\n${t.w.remote ? `Joining ${remoteOf(t.w).label} ${remoteOf(t.w).noun} ${t.w.remote.host}…` : `Reopening in ${t.w.dir}…`}`
             : savedTabTitle(t.w);
       el.dataset.tip = title;
       if (tip?.el === el) showTip(el); // open: show the fresh facts
@@ -662,9 +712,10 @@ export function startTmuxMode({ container, toolbar, params }) {
     const lines = [w.name];
     const info = tabInfo.get(w.id);
     if (w.remote) {
-      const open = info?.panes[0]?.openSecs;
-      const age = open == null ? '' : `  ·  open ${duration(open + Math.round((Date.now() - info.at) / 1000))}`;
-      lines.push(`${remoteOf(w).label} VM ${w.remote.host}${age}`, 'Its shells run in the VM\'s own tmux.');
+      // Up since the machine was made, not since the tab opened (making takes minutes).
+      const since = info?.upSince ?? w.remote.upSince;
+      const up = since ? `  ·  up ${duration(Math.max(0, Math.round(Date.now() / 1000 - since)))}` : '  ·  being made…';
+      lines.push(`${remoteOf(w).label} ${remoteOf(w).noun} ${w.remote.host}${up}`, `Its shells run in the ${remoteOf(w).noun}'s own tmux.`);
     } else if (!info) lines.push('…');
     else {
       const age = (secs) => (secs == null ? null : duration(secs + Math.round((Date.now() - info.at) / 1000)));
@@ -686,9 +737,9 @@ export function startTmuxMode({ container, toolbar, params }) {
     if (w.remote)
       return [
         w.name,
-        `${remoteOf(w).label} VM ${w.remote.host}`,
+        `${remoteOf(w).label} ${remoteOf(w).noun} ${w.remote.host}`,
         'Tap to join it again: its shells kept running there,',
-        'unless the VM has been deleted since (its time to live).',
+        `unless it has been deleted since (${remoteOf(w).lifetime}).`,
         '',
         'Drag to reorder · right-click for more',
       ].join('\n');
@@ -865,6 +916,18 @@ export function startTmuxMode({ container, toolbar, params }) {
                 renderTabs();
               },
             ],
+            [
+              'Close',
+              t.w.remote
+                ? `Close this tab for good, even if it is stuck; the ${remoteOf(t.w).noun} keeps running (${remoteOf(t.w).lifetime})`
+                : 'Close this window for good, ending what runs in it; no dotted tab is kept',
+              () => {
+                const what = t.w.remote ? 'tab' : 'window, and everything running in it';
+                if (t.w.remote || confirm(`Close "${t.w.name}" for good?\n\nThe ${what} ends; no dotted tab is kept.`))
+                  send({ t: 'close', w: t.w.id });
+              },
+            ],
+            ...deleteItem(t),
           ]
         : [
             [
@@ -873,23 +936,43 @@ export function startTmuxMode({ container, toolbar, params }) {
               () => tabEls.get(key)?.click(),
             ],
             ['Forget', 'Remove this dotted tab for good', () => send({ t: 'forget', id: key })],
+            ...deleteItem(t),
           ],
       x,
       y,
     );
   }
 
-  // A small menu at (x, y): items are [label, title, action].
+  // For a remote tab: delete its machine for good (asks first), and the tab.
+  function deleteItem(t) {
+    if (!t.w.remote) return [];
+    const r = remoteOf(t.w);
+    const what = `${r.label} ${r.noun} ${t.w.remote.host}`;
+    return [
+      [
+        `Delete the ${r.noun}…`,
+        `Delete ${what} and close this tab`,
+        () => {
+          if (!confirm(`Delete ${what} for good?\n\nEverything on it is lost, and this tab closes.`)) return;
+          send(t.kind === 'live' ? { t: 'delete-remote', w: t.w.id } : { t: 'delete-remote', id: t.key });
+        },
+        '#ff6b6b',
+      ],
+    ];
+  }
+
+  // A small menu at (x, y): items are [label, title, action, color?].
   function showMenu(items, x, y) {
     closeTabMenu();
     hideTip();
     const menu = document.createElement('div');
     menu.className = 'tab-menu';
     menu.setAttribute('role', 'menu');
-    for (const [label, title, run] of items) {
+    for (const [label, title, run, color] of items) {
       const b = document.createElement('button');
       b.textContent = label;
       b.title = title;
+      if (color) b.style.color = color;
       b.setAttribute('role', 'menuitem');
       b.addEventListener('click', () => {
         closeTabMenu();
@@ -974,6 +1057,17 @@ export function startTmuxMode({ container, toolbar, params }) {
   // through tmux's key tables instead of to the pane.
   function keyHandler(e) {
     if (windowSwitchDirection(e)) return false;
+    // Plain selection: Ctrl+C with text selected copies it (as Cmd+C does)
+    // instead of interrupting; with nothing selected it interrupts as ever.
+    const term = panes.get(activePane)?.term;
+    if (plainSelect && e.ctrlKey && !e.metaKey && !e.altKey && e.code === 'KeyC' && term?.hasSelection()) {
+      if (e.type === 'keydown') {
+        navigator.clipboard.writeText(term.getSelection()).catch((err) => console.warn('copy failed', err));
+        term.clearSelection();
+      }
+      e.preventDefault();
+      return false;
+    }
     if (e.type === 'keyup') return !swallowedKeyUps.delete(e.code);
     if (e.type !== 'keydown' || !prefix) return true;
     const name = tmuxKeyName(e);
@@ -1022,46 +1116,65 @@ export function startTmuxMode({ container, toolbar, params }) {
     title: 'New tmux window',
   });
 
-  // One "+ <remote>" button per remote in ~/.dtmux.yaml, after the plain +.
-  // Each makes a new VM, which costs money, so it asks first.
-  const remoteButtons = new Map(); // name -> button
+  // Right-click on + (or a long press) offers the remotes of ~/.dtmux.yaml
+  // too: a new tab on a new machine there. Paid ones (VMs) ask first.
   function setRemotes(list) {
     remotes = Array.isArray(list) ? list : [];
-    const names = new Set(remotes.map((r) => r.name));
-    for (const [name, b] of remoteButtons) if (!names.has(name)) (b.remove(), remoteButtons.delete(name));
-    let after = newWindowButton;
-    for (const r of remotes) {
-      let b = remoteButtons.get(r.name);
-      if (!b) {
-        b = toolbar.addButton('', () => newRemote(r.name), { side: 'left' });
-        b.classList.add('new-remote');
-        remoteButtons.set(r.name, b);
-      }
-      b.textContent = `+ ${r.label}`;
-      b.title = `New ${r.label} VM (${r.plan}), deleted after ${hours(r.ttlSeconds)}`;
-      b.style.setProperty('--remote', r.color);
-      b.disabled = newWindowButton.disabled;
-      after.after(b);
-      after = b;
-    }
+    newWindowButton.title = remotes.length ? 'New tmux window · right-click for a remote machine' : 'New tmux window';
     renderTabs();
   }
+  function showNewMenu() {
+    if (newWindowButton.disabled) return;
+    const r = newWindowButton.getBoundingClientRect();
+    showMenu(
+      [
+        ['New window', 'A new tmux window on this machine', () => send({ t: 'new-window' })],
+        ...remotes.map((x) => [
+          `New ${x.label} ${x.noun}${x.paid ? '…' : ''}`,
+          `A new tab on a new ${x.label} ${x.noun}${x.plan ? ` (${x.plan})` : ''}, ${x.lifetime}`,
+          () => newRemote(x.name),
+          x.color,
+        ]),
+      ],
+      r.left,
+      r.bottom + 4,
+    );
+  }
+  newWindowButton.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    showNewMenu();
+  });
+  let pressTimer = null;
+  newWindowButton.addEventListener('pointerdown', (e) => {
+    if (e.pointerType === 'mouse') return;
+    pressTimer = setTimeout(() => {
+      pressTimer = null;
+      showNewMenu();
+      const eat = (ev) => (ev.preventDefault(), ev.stopPropagation());
+      window.addEventListener('click', eat, { capture: true, once: true });
+    }, 500);
+  });
+  for (const ev of ['pointerup', 'pointercancel', 'pointerleave'])
+    newWindowButton.addEventListener(ev, () => clearTimeout(pressTimer));
   function newRemote(name) {
     const r = remotes.find((x) => x.name === name);
     if (!r) return;
-    const ok = confirm(
-      `Make a new ${r.label} VM?\n\nPlan ${r.plan}; it costs money while it exists and is deleted after ${hours(r.ttlSeconds)}.\nMaking it takes a few minutes; the new tab shows how it goes.`,
-    );
+    const ok =
+      !r.paid ||
+      confirm(
+        `Make a new ${r.label} ${r.noun}?\n\n${r.plan ? `Plan ${r.plan}; it` : 'It'} costs money while it exists and is ${r.lifetime}.\nMaking it takes a few minutes; the new tab shows how it goes.`,
+      );
     if (ok) send({ t: 'new-remote', name });
     panes.get(activePane)?.term.focus();
   }
-  const hours = (s) => (s % 3600 ? `${Math.round(s / 60)} min` : `${s / 3600}h`);
   // The remote a tab's window is on, as configured (or a stand-in).
   const remoteOf = (w) =>
-    remotes.find((r) => r.name === w.remote?.name) ?? { label: w.remote?.name ?? '', color: '#c58af9' };
-  new MutationObserver(() => {
-    for (const b of remoteButtons.values()) b.disabled = newWindowButton.disabled;
-  }).observe(newWindowButton, { attributes: true, attributeFilter: ['disabled'] });
+    remotes.find((r) => r.name === w.remote?.name) ?? {
+      label: w.remote?.name ?? '',
+      color: '#c58af9',
+      noun: 'machine',
+      lifetime: 'not in ~/.dtmux.yaml any more',
+    };
 
   // Both restarts run the code on disk now. Soft: only dtmux restarts; tmux
   // and every shell keep running and the page reattaches. Full: the windows
@@ -1108,6 +1221,77 @@ export function startTmuxMode({ container, toolbar, params }) {
   );
   restartButton.classList.add('restart');
   restartButton.disabled = true;
+
+  // Text selection. Smart: mouse events go to the program in the terminal
+  // when it asks for them (tmux, vim, an agent's UI), so selecting is theirs.
+  // Plain: the page selects text itself, instantly, for Cmd+C, whatever the
+  // program wants; the wheel still goes to the program. Over a slow link (a
+  // remote VM's tmux) plain is the one that feels right. Implemented as the
+  // Option+drag xterm.js already offers: the press is handed on with Option.
+  const SELECT_KEY = 'dtmux.plainSelect';
+  let plainSelect = false;
+  try {
+    plainSelect = localStorage.getItem(SELECT_KEY) === '1';
+  } catch {}
+  const selectButton = toolbar.addButton('', () => {
+    plainSelect = !plainSelect;
+    try {
+      localStorage.setItem(SELECT_KEY, plainSelect ? '1' : '0');
+    } catch {}
+    showSelectMode();
+    panes.get(activePane)?.term.focus();
+  });
+  selectButton.classList.add('select-mode');
+  document.getElementById('status').before(selectButton);
+  function showSelectMode() {
+    selectButton.textContent = plainSelect ? 'select: plain' : 'select: smart';
+    selectButton.classList.toggle('on', plainSelect);
+    selectButton.title = plainSelect
+      ? 'Plain text selection: dragging selects text here, instantly, for Cmd+C; programs get no clicks. Click for smart.'
+      : 'Smart selection: programs that use the mouse (tmux, vim, agents) get clicks and drags. Option+drag still selects text. Click for plain.';
+  }
+  showSelectMode();
+  // The press, the movement and the release of a drag all go with Option,
+  // or the program still gets the motion (and the selection is cut short).
+  // Plain hover motion over a terminal too: programs get no mouse at all.
+  let plainDrag = false;
+  const overTerminal = (e) => e.target instanceof Element && e.target.closest('.tmux-pane .xterm-screen');
+  const forceSelect = (e) => {
+    if (!plainSelect || !e.isTrusted || e.altKey) return;
+    if (e.type === 'mousedown') {
+      if (e.button !== 0 || !overTerminal(e)) return;
+      plainDrag = true;
+    } else if (!plainDrag && !overTerminal(e)) return;
+    if (e.type === 'mouseup') plainDrag = false;
+    e.stopImmediatePropagation();
+    e.preventDefault();
+    // The press goes to the terminal (with Option, so xterm.js selects). The
+    // movement and release go to the document only: the selection follows
+    // them there, while the terminal element, which reports them to the
+    // program, never sees them.
+    const to = e.type === 'mousedown' ? e.target : document;
+    to.dispatchEvent(new MouseEvent(e.type, { ...pick(e), altKey: true, bubbles: true, cancelable: true }));
+    // Taking over the press keeps the terminal from taking the focus; give
+    // it, so Cmd+C reaches the terminal that has the selection.
+    if (e.type === 'mousedown') {
+      const id = [...panes].find(([, p]) => p.el.contains(e.target))?.[0];
+      panes.get(id)?.term.focus();
+    }
+  };
+  const pick = (e) => ({
+    clientX: e.clientX,
+    clientY: e.clientY,
+    screenX: e.screenX,
+    screenY: e.screenY,
+    button: e.button,
+    buttons: e.buttons,
+    detail: e.detail,
+    shiftKey: e.shiftKey,
+    ctrlKey: e.ctrlKey,
+    metaKey: e.metaKey,
+    view: window,
+  });
+  for (const type of ['mousedown', 'mousemove', 'mouseup']) window.addEventListener(type, forceSelect, true);
 
   connect();
   window.tmuxPanes = panes; // for debugging from the console

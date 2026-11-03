@@ -9,6 +9,10 @@
 // same port, running the code as it is on disk now. A soft restart starts the
 // new daemon without touching tmux: sessions, windows and shells keep running
 // and pages reattach to them.
+//
+// Every 30 s it also writes down what is open (live-snapshot.js), so that a
+// stop that could not save (a crash, power loss, tmux gone first at a
+// reboot) still brings the windows back as dotted tabs on the next start.
 import fs from 'node:fs';
 import { execFile, execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -16,10 +20,9 @@ import { startServer, HOST, DEFAULT_SESSION } from './app.js';
 import { TMUX_BIN, TMUX_SOCKET, tmuxArgs } from './tmux-control.js';
 import { PID_FILE, STATE_DIR, LOG_FILE, HANDOVER_FILE } from './paths.js';
 import { exportKitty, importKitty } from './kitty-tracker.js';
-import { saveOnStop, ID_OPTION } from './saved-windows.js';
+import { saveOnStop } from './saved-windows.js';
 import { closeAgents } from './agent-close.js';
-import { branchOf } from './git-branch.js';
-import { REMOTE_OPTION, parseRemote } from './remotes.js';
+import { LIVE_FORMAT, parseLive, writeSnapshot, readSnapshot, dropSnapshot } from './live-snapshot.js';
 
 const port = Number(process.argv[2]);
 const restarted = process.argv[3] === '--restarted';
@@ -37,6 +40,7 @@ process.title = 'dtmux';
 const log = (msg) => console.log(`${new Date().toISOString()} [${process.pid}] ${msg}`);
 
 takeHandOver();
+recoverSnapshot();
 
 let server, wss;
 // After a restart the old daemon has just let go of the port; give the OS a
@@ -168,17 +172,6 @@ function startAgain() {
   }
 }
 
-const LIVE_FORMAT = [
-  '#{session_name}',
-  '#{window_index}',
-  `#{${ID_OPTION}}`,
-  '#{automatic-rename}',
-  '#{window_id}',
-  '#{pane_current_path}',
-  `#{${REMOTE_OPTION}}`,
-  '#{window_name}',
-].join('\t');
-
 // Every window of every session, written down before tmux goes away: its
 // directory and git branch, and, for a coding agent, how to resume it. The
 // agents are closed first so they print their resume lines (agent-close.js).
@@ -194,35 +187,58 @@ async function saveWindows(done) {
   }
   if (agents.size) log(`closed ${agents.size} coding agent(s) to resume later`);
   execFile(TMUX_BIN, tmuxArgs('list-windows', '-a', '-F', LIVE_FORMAT), (err, out, stderr) => {
-    const live = [];
+    let live = [];
     if (err) {
       if (!/no server running|error connecting/i.test(stderr)) log(`list-windows: ${stderr.trim() || err.message}`);
-    } else {
-      for (const line of out.split('\n').filter(Boolean)) {
-        const [session, index, id, auto, windowId, paneDir, remote, ...name] = line.split('\t');
-        const agent = agents.get(windowId);
-        const dir = agent?.dir || paneDir;
-        live.push({
-          session,
-          index: Number(index),
-          id,
-          autoName: auto === '1',
-          dir,
-          branch: branchOf(dir),
-          agent: agent ? { name: agent.agent, command: agent.command } : null,
-          remote: parseRemote(remote),
-          name: name.join('\t'),
-        });
+      // tmux went first (at shutdown everything is told to stop at once):
+      // what was open a moment ago will do.
+      const snap = readSnapshot();
+      if (snap?.live.length) {
+        live = snap.live;
+        log(`tmux is gone; saving the ${live.length} window(s) open at ${snap.at}`);
       }
-    }
+    } else live = parseLive(out, agents);
     try {
       log(`saved ${saveOnStop(live)} window(s) for later (${live.length} were open)`);
+      dropSnapshot();
     } catch (e) {
       log(`could not save windows: ${e.message}`);
     }
     done();
   });
 }
+
+// After a stop that saved nothing (a crash, power loss): if the tmux server
+// the snapshot describes is gone, its windows become dotted tabs.
+function recoverSnapshot() {
+  const snap = readSnapshot();
+  if (!snap) return;
+  let pid = '';
+  try {
+    pid = execFileSync(TMUX_BIN, tmuxArgs('display', '-p', '#{pid}'), { encoding: 'utf8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+  } catch {}
+  if (pid && pid === snap.tmuxPid) return; // still running (a soft restart): nothing was lost
+  try {
+    log(`dtmux did not stop cleanly; ${saveOnStop(snap.live)} window(s) saved from the snapshot of ${snap.at}`);
+    dropSnapshot();
+  } catch (e) {
+    log(`could not recover the snapshot: ${e.message}`);
+  }
+}
+
+// Keep the snapshot fresh while running.
+const SNAPSHOT_MS = 30000;
+let snapshotBusy = false;
+setInterval(async () => {
+  if (stopping || snapshotBusy) return;
+  snapshotBusy = true;
+  try {
+    await writeSnapshot();
+  } catch (e) {
+    log(`snapshot: ${e.message}`);
+  }
+  snapshotBusy = false;
+}, SNAPSHOT_MS).unref();
 
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));

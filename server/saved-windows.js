@@ -11,7 +11,7 @@
 //     "sessions": { "<session>": [ { id, name, autoName, dir, branch?, agent?, remote? }, ... ] } }
 // `branch`: the git branch `dir` was on. `agent`: { name, command }, the coding
 // agent that ran there and the command that resumes it (see agent-close.js).
-// `remote`: { name, host }, for a tab on a remote VM (see remotes.js).
+// `remote`: { name, host, address?, upSince? }, for a tab on a remote VM (see remotes.js).
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -32,8 +32,11 @@ const isEntry = (e) =>
 // The fields kept for a saved window; anything else is dropped.
 function clean({ id, name, autoName, dir, branch, agent, remote }) {
   const e = { id, name, autoName: Boolean(autoName), dir };
-  if (remote && typeof remote.name === 'string' && typeof remote.host === 'string' && remote.name && remote.host)
+  if (remote && typeof remote.name === 'string' && typeof remote.host === 'string' && remote.name && remote.host) {
     e.remote = { name: remote.name, host: remote.host };
+    if (typeof remote.address === 'string' && remote.address) e.remote.address = remote.address;
+    if (Number.isInteger(remote.upSince)) e.remote.upSince = remote.upSince;
+  }
   if (typeof branch === 'string' && branch) e.branch = branch;
   if (agent && typeof agent.name === 'string' && typeof agent.command === 'string' && agent.command)
     e.agent = { name: agent.name, command: agent.command };

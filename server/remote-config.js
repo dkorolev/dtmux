@@ -1,23 +1,31 @@
 // The `remotes:` part of ~/.dtmux.yaml: machines a tab can live on instead
 // of this one. Each remote is reached with plain `ssh`; how its machines are
-// made and found is spelled out here, never assumed by the code.
+// made and found is spelled out here, never assumed by the code (see
+// remote-kinds.js for what each kind does with it).
 //
 //   remotes:
 //     lunanode:                      # the name tabs remember; [a-z0-9-]
 //       kind: lunanode-ctl           # VMs made by a lunanode-ctl controller
 //       controller: [ssh, lunanode, lunanode-ctl]   # how to run the controller
 //       seed: ~/.ssh/lunanode.seed   # caller seed, fed on stdin, never in argv
-//       label: LunaNode              # optional; shown on the page
-//       color: "#c58af9"             # optional; the tint of its tabs
 //       plan: m.1s                   # optional; lunanode-ctl create --plan
 //       image: Ubuntu 24.04          # optional; --image
-//       ipv4: true                   # optional; --ipv4 (a public IPv4 to ssh to)
+//       ipv4: false                  # optional; --ipv4 (a public IPv4 too; IPv6 only otherwise)
 //       ttlSeconds: 86400            # optional; the VM is deleted after this
 //       hostPrefix: dtmux            # optional; new VMs are <hostPrefix>-<8 hex>
 //       user: ubuntu                 # optional; ssh login on the VM
-//       identity: ~/.ssh/id_ed25519  # optional; ssh -i, the seed's own key
-//       attach: <remote command>     # optional; what ssh runs there (see below)
+//     hetzner:
+//       kind: devbox-ctl             # accounts on a host, made by devbox-ctl
+//       controller: [ssh, devbox, devbox-ctl]
+//       address: your.hetzner.dns.name        # where to ssh into an account directly
+//   and for every kind, optional:
+//       label: LunaNode              # shown on the page (default: the name)
+//       color: "#c58af9"             # the tint of its tabs (default per kind)
+//       identity: ~/.ssh/id_ed25519  # ssh -i
+//       jump: lunanode               # ssh through this host (e.g. to reach IPv6)
+//       attach: <remote command>     # what ssh runs there (see DEFAULT_ATTACH)
 import os from 'node:os';
+import { kindOf } from './remote-kinds.js';
 import path from 'node:path';
 
 // What runs on the VM: its own tmux, so the shells there keep running with
@@ -32,28 +40,40 @@ export const DEFAULT_ATTACH =
 const NAME = /^[a-z][a-z0-9-]{0,30}$/;
 const isStr = (v) => typeof v === 'string' && v.trim() !== '';
 
+const color = (v) => (typeof v === 'string' && /^#[0-9a-fA-F]{6}$/.test(v) ? null : 'must be a color like "#c58af9"');
+
 // field -> [check(value) -> error | null, default (undefined: required)]
-const FIELDS = {
-  kind: [(v) => (v === 'lunanode-ctl' ? null : 'must be "lunanode-ctl" (the only kind so far)'), undefined],
+const COMMON = {
+  kind: [(v) => (KIND_FIELDS[v] ? null : `must be one of: ${Object.keys(KIND_FIELDS).join(', ')}`), undefined],
   controller: [
     (v) => (Array.isArray(v) && v.length && v.every(isStr) ? null : 'must be a non-empty list of words, e.g. [ssh, lunanode, lunanode-ctl]'),
     undefined,
   ],
-  seed: [(v) => (isStr(v) ? null : 'must be the path of the caller seed file'), undefined],
   label: [(v) => (isStr(v) && v.length <= 40 ? null : 'must be a short name'), null],
-  color: [(v) => (typeof v === 'string' && /^#[0-9a-fA-F]{6}$/.test(v) ? null : 'must be a color like "#c58af9"'), '#c58af9'],
-  plan: [(v) => (isStr(v) ? null : 'must be a plan name, e.g. m.1s'), 'm.1s'],
-  image: [(v) => (isStr(v) ? null : 'must be an image name, e.g. Ubuntu 24.04'), 'Ubuntu 24.04'],
-  ipv4: [(v) => (typeof v === 'boolean' ? null : 'must be true or false'), true],
-  ttlSeconds: [
-    (v) => (Number.isInteger(v) && v >= 60 && v <= 2592000 ? null : 'must be an integer from 60 to 2592000'),
-    86400,
-  ],
-  hostPrefix: [(v) => (typeof v === 'string' && /^[a-z][a-z0-9-]{0,20}$/.test(v) ? null : 'must be lowercase letters, digits and dashes'), 'dtmux'],
-  user: [(v) => (typeof v === 'string' && /^[a-z_][a-z0-9_.-]*$/i.test(v) ? null : 'must be a login name'), 'ubuntu'],
   identity: [(v) => (isStr(v) ? null : 'must be the path of an ssh private key'), null],
+  jump: [(v) => (typeof v === 'string' && /^[\w@.:,\[\]-]+$/.test(v) ? null : 'must be an ssh destination, e.g. lunanode'), null],
   attach: [(v) => (isStr(v) ? null : 'must be a shell command'), DEFAULT_ATTACH],
 };
+const KIND_FIELDS = {
+  'lunanode-ctl': {
+    color: [color, '#c58af9'], // purple
+    seed: [(v) => (isStr(v) ? null : 'must be the path of the caller seed file'), undefined],
+    plan: [(v) => (isStr(v) ? null : 'must be a plan name, e.g. m.1s'), 'm.1s'],
+    image: [(v) => (isStr(v) ? null : 'must be an image name, e.g. Ubuntu 24.04'), 'Ubuntu 24.04'],
+    ipv4: [(v) => (typeof v === 'boolean' ? null : 'must be true or false'), false],
+    ttlSeconds: [
+      (v) => (Number.isInteger(v) && v >= 60 && v <= 2592000 ? null : 'must be an integer from 60 to 2592000'),
+      86400,
+    ],
+    hostPrefix: [(v) => (typeof v === 'string' && /^[a-z][a-z0-9-]{0,20}$/.test(v) ? null : 'must be lowercase letters, digits and dashes'), 'dtmux'],
+    user: [(v) => (typeof v === 'string' && /^[a-z_][a-z0-9_.-]*$/i.test(v) ? null : 'must be a login name'), 'ubuntu'],
+  },
+  'devbox-ctl': {
+    color: [color, '#ff9f43'], // orange
+    address: [(v) => (typeof v === 'string' && /^[\w.:-]+$/.test(v) ? null : 'must be a host name or address, e.g. your.hetzner.dns.name'), undefined],
+  },
+};
+const fieldsOf = (kind) => ({ ...COMMON, ...(KIND_FIELDS[kind] ?? {}) });
 
 const show = (v) => (typeof v === 'string' ? JSON.stringify(v) : JSON.stringify(v) ?? String(v));
 const isMap = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
@@ -68,9 +88,10 @@ export function checkRemotes(value) {
       problems.push(`${name}: must be a mapping of settings (kind, controller, seed, ...)`);
       continue;
     }
+    const FIELDS = fieldsOf(r.kind);
     for (const [field, v] of Object.entries(r)) {
       const spec = FIELDS[field];
-      if (!spec) problems.push(`${name}: unknown key "${field}" (allowed: ${Object.keys(FIELDS).join(', ')})`);
+      if (!spec) problems.push(`${name}: unknown key "${field}" (allowed for ${r.kind ?? 'this kind'}: ${Object.keys(FIELDS).join(', ')})`);
       else {
         const err = spec[0](v);
         if (err) problems.push(`${name}.${field}: ${err}, got ${show(v)}`);
@@ -89,15 +110,27 @@ export function normalizeRemotes(value) {
   const out = {};
   for (const [name, r] of Object.entries(value ?? {})) {
     const full = { name };
-    for (const [field, [, def]] of Object.entries(FIELDS)) full[field] = field in r ? r[field] : def;
+    for (const [field, [, def]] of Object.entries(fieldsOf(r.kind))) full[field] = field in r ? r[field] : def;
     full.label ??= name;
-    full.seed = expandHome(full.seed);
+    if (full.seed) full.seed = expandHome(full.seed);
     full.identity = expandHome(full.identity);
     out[name] = full;
   }
   return out;
 }
 
-// What a page may know of the remotes: no paths, no commands.
+// What a page may know of the remotes: no paths, no commands. `paid`: each
+// new machine costs money, so the page asks first.
 export const pageRemotes = (remotes) =>
-  Object.values(remotes ?? {}).map(({ name, label, color, plan, ttlSeconds }) => ({ name, label, color, plan, ttlSeconds }));
+  Object.values(remotes ?? {}).map((r) => {
+    const kind = kindOf(r);
+    return {
+      name: r.name,
+      label: r.label,
+      color: r.color,
+      noun: kind.noun,
+      lifetime: kind.lifetime(r),
+      paid: r.kind === 'lunanode-ctl',
+      plan: r.plan ?? null,
+    };
+  });

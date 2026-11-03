@@ -32,46 +32,71 @@ code 2). If you change the port while dtmux runs, `dtmux` tells you so;
 
 ## Remote sessions
 
-A tab can live on a remote VM instead of this machine. Each remote in
-`~/.dtmux.yaml` gets a `+ <label>` button next to `+`, and its tabs wear its
-color. Nothing about a remote is built in: how to reach its controller, the
-key, the plan and the VM's lifetime are all in the config.
+A tab can live on a remote machine instead of this one. Right-click (or
+long-press) `+` for a new tab on one of the remotes in `~/.dtmux.yaml`; its
+tabs wear its color. Nothing about a remote is built in: how to reach its
+controller, the key and the machine's lifetime are all in the config. Two
+kinds so far (see `server/remote-kinds.js`):
 
 ```yaml
 remotes:
   lunanode:                     # the name tabs remember: [a-z0-9-]
-    kind: lunanode-ctl          # VMs made by a lunanode-ctl controller (the only kind so far)
+    kind: lunanode-ctl          # a VM per tab, made by lunanode-ctl
     controller: [ssh, lunanode, lunanode-ctl]   # required: how to run the controller
     seed: ~/.ssh/lunanode.seed  # required: caller seed, fed on stdin, never in arguments
-    identity: ~/.ssh/id_ed25519 # ssh -i for the VM: the seed's own key
-    label: LunaNode             # optional, default: the name
-    color: "#c58af9"            # optional: the tint of its tabs
     plan: m.1s                  # optional: create --plan
     image: Ubuntu 24.04         # optional: create --image
-    ipv4: true                  # optional: create --ipv4
+    ipv4: false                 # optional: create --ipv4 (else IPv6 only)
     ttlSeconds: 86400           # optional: the VM is deleted this long after it is made
     hostPrefix: dtmux           # optional: new VMs are <hostPrefix>-<8 hex>
     user: ubuntu                # optional: ssh login
-    attach: …                   # optional: what ssh runs there (default below)
+  hetzner:
+    kind: devbox-ctl            # an account per tab on one host, made by devbox-ctl
+    controller: [ssh, devbox, devbox-ctl]
+    address: your.hetzner.dns.name       # required: where to ssh into an account
+  # every kind, optional:
+  #   label: LunaNode           # shown on the page (default: the name)
+  #   color: "#c58af9"          # tab tint (default: purple for LunaNode, orange for devbox)
+  #   identity: ~/.ssh/id_ed25519   # ssh -i
+  #   jump: lunanode            # ssh through this host, e.g. to reach IPv6
+  #   attach: …                 # what ssh runs there (default: the machine's tmux)
 ```
 
 `remotes` is read on every use, so edits count without a restart.
 
-- **A new tab makes a new VM** (after a confirm: VMs cost money). The tab's
-  terminal shows the progress, then lands in the VM. Creating is a managed
-  `lunanode-ctl create` with run id `dtmux-<host>`, so a dropped connection to
-  the controller, or a restart in the middle, waits for that same operation
-  rather than making a second VM.
-- **The shells run in the VM's own tmux** (session `dtmux`, status line off,
-  mouse on; installed with apt if missing). The ssh connection can go away
-  (the laptop sleeps or reboots, dtmux restarts, you Disconnect the tab) and
-  everything on the VM keeps running.
-- **Rejoining.** A dropped connection is retried in place. A tab closed by a
-  full restart or Disconnect turns dotted, remembering its VM; tapping it
-  ssh-es back into the same tmux session. If the VM is gone (past its TTL),
-  the tab says so and offers to make a new one.
-- Exiting the shell in the VM (or detaching its tmux) ends the tab; the VM
-  stays until its TTL.
+- **A new tab makes a new machine.** LunaNode VMs cost money, so they are
+  confirmed first. The tab's terminal shows the progress, then lands on the
+  machine. A LunaNode create is managed (run id `dtmux-<host>`), so a dropped
+  connection to the controller, or a restart in the middle, waits for that
+  same operation rather than making a second VM. A devbox account
+  (`devbox-user-NNNNNN`) takes seconds and is free. Every controller call is
+  short and has a time limit, so a connection that dies silently is noticed
+  and retried.
+- **The shells run in the machine's own tmux** (session `dtmux`, status line
+  off, mouse on; installed with apt if missing). The ssh connection can go
+  away (the laptop sleeps or reboots, dtmux restarts, you Disconnect the
+  tab) and everything there keeps running.
+- **Rejoining is quick.** A tab remembers its machine's address, so
+  reopening it goes straight to ssh; the controller is asked only when that
+  address does not answer. ssh connections are shared and kept open for
+  hours (ControlMaster), so rejoining reuses one instead of logging in again:
+  under a second where a fresh login takes several.
+- **Lifetimes.** LunaNode VMs are deleted `ttlSeconds` after they are made.
+  devbox accounts are deleted after 24 hours with no change in their home,
+  so a connected tab touches `~/.dtmux-alive` there every 30 minutes. A tab
+  whose machine is gone says so and offers to make a new one.
+- **Closing for good.** Right-click a tab: **Close** ends it with no dotted
+  tab (it works on a stuck tab, from outside); **Delete the VM / account…**
+  asks, then deletes the machine and closes the tab. Dotted remote tabs have
+  Delete too.
+- **When the session there ends** (its last shell exits, or its tmux is
+  detached), the tab stays, since the machine still runs: it shows
+  **Reconnect**, **Delete the VM… / account…** and **Close tab** (the
+  terminal takes Enter, `d` and Ctrl+C for the same). The page hears of it
+  at once through a tmux format subscription on the window option
+  `@dtmux_remote_state`.
+- **Uptime.** A tab's tooltip counts from when its machine was ready, not
+  from when the tab opened.
 - Host keys go to `~/.dtmux/known_hosts`, not your own: VM addresses are
   reused, and a new VM's old entry is dropped when it is made.
 
@@ -93,6 +118,40 @@ remotes:
   their terminals still on screen. The panes' kitty keyboard state (which
   keeps Shift+Enter working in Claude Code) is handed to the new daemon in
   `~/.dtmux/handover.json`, used only if the tmux server is still the same.
+- **Reboots and crashes.** Every 30 s the daemon writes down what is open
+  (`~/.dtmux/live-windows.json`: windows, directories, branches, remote VMs,
+  and each coding agent's resume command from its command line). A stop that
+  cannot list the windows itself (at a reboot tmux may be gone first) saves
+  them from there, and a start after a crash or power loss recovers them
+  from there. Either way they come back as dotted tabs. Programs and
+  scrollback on this machine do not survive a reboot; remote tabs do, since
+  their shells run in the VM's tmux.
+- **Starting at login, stopping before logout** (macOS): `sh macos/install.sh`
+  installs two LaunchAgents. `com.dima.dtmux` runs `dtmux start` once at
+  login. `com.dima.dtmux.guard` runs DtmuxGuard.app (`macos/DtmuxGuard.swift`),
+  an invisible app that macOS asks to quit before a logout, restart or
+  shutdown. It holds that until `dtmux kill` has stopped gently (coding
+  agents closed with Ctrl+C and their exact resume commands written down,
+  windows saved), at most 25 s, so nothing is left to the moment when every
+  process gets SIGTERM at once. If the logout is then cancelled, it starts
+  dtmux again a minute later.
+
+## Popups
+
+A popup about a tab (the resume command an agent printed as it left, the
+branch a reopened tab was put back on) shows on that tab only, and goes
+away when you switch tabs. Popups about dtmux itself show whatever the tab.
+
+## Text selection
+
+The toggle left of `dtmux` switches how a drag in a terminal works.
+**Smart**: programs that ask for the mouse (tmux, vim, coding agents) get the
+clicks and drags. **Plain**: the page selects the text itself, instantly, for
+Cmd+C, whatever the program wants; the wheel still goes to the program. In
+plain mode Ctrl+C copies too while text is selected (and interrupts, as ever,
+when nothing is). Plain
+is the one for remote tabs, where the VM's tmux would otherwise do the
+selecting, a round trip away. Option+drag selects text in either mode.
 
 ### A soft restart is always enough
 

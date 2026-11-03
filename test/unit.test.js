@@ -394,7 +394,11 @@ test('restoreBranch switches back only when nothing can be hurt', async () => {
 });
 
 test('remote window values parse, and nothing else does', () => {
-  assert.deepEqual(parseRemote('lunanode/dtmux-1a2b3c4d'), { name: 'lunanode', host: 'dtmux-1a2b3c4d' });
+  assert.deepEqual(parseRemote('lunanode/dtmux-1a2b3c4d'), { name: 'lunanode', host: 'dtmux-1a2b3c4d', address: null, upSince: null, ended: false });
+  assert.deepEqual(parseRemote('lunanode/h|2602:ffb6::1|1793695053'), { name: 'lunanode', host: 'h', address: '2602:ffb6::1', upSince: 1793695053, ended: false });
+  assert.deepEqual(parseRemote('lunanode/h||'), { name: 'lunanode', host: 'h', address: null, upSince: null, ended: false });
+  assert.equal(parseRemote('lunanode/h|1.2.3.4;rm|x').address, null);
+  assert.equal(parseRemote('lunanode/h|||ended').ended, true);
   assert.equal(parseRemote(''), null);
   assert.equal(parseRemote('lunanode'), null);
   assert.equal(parseRemote('a/b c'), null);
@@ -405,4 +409,5 @@ test('a remote tab runs the helper, creating only when asked', () => {
   const join = remoteCommand({ name: 'lunanode', host: 'dtmux-1a2b3c4d' });
   assert.match(join, /DTMUX_CONFIG=\S+ DTMUX_STATE_DIR=\S+ exec \S+ \S+dtmux-remote\.js lunanode dtmux-1a2b3c4d$/);
   assert.match(remoteCommand({ name: 'lunanode', host: 'h' }, { create: true }), / lunanode h --new$/);
+  assert.match(remoteCommand({ name: 'lunanode', host: 'h', address: '2602:ffb6::1', upSince: 1793695053 }), / lunanode h --addr 2602:ffb6::1 --up 1793695053$/);
 });

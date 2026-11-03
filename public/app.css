@@ -249,17 +249,25 @@ body {
   position: absolute;
   inset: 4px;
 }
+/* Windows not shown skip layout and paint altogether (not just visibility),
+   so their terminals' output costs nothing until their tab is picked; their
+   state is kept, and script can still measure them. */
 .tmux-window {
   position: absolute;
   inset: 0;
   visibility: hidden;
+  content-visibility: hidden;
+  contain: strict;
 }
 .tmux-window.active {
   visibility: visible;
+  content-visibility: visible;
 }
+/* Sized by the page, never by its content: a pane's redraws stay inside it. */
 .tmux-pane {
   position: absolute;
   overflow: hidden;
+  contain: strict;
 }
 /* Reconnecting: the panes stay, dimmed, until fresh state takes over. */
 .tmux-stage.stale .tmux-window {
@@ -484,7 +492,58 @@ body {
   border-color: var(--remote);
   color: var(--fg);
 }
-#toolbar button.new-remote {
-  color: var(--remote);
-  border-color: color-mix(in srgb, var(--remote) 50%, transparent);
+
+/* The selection toggle, left of the status. */
+#toolbar button.select-mode {
+  font-size: 11px;
+  color: #888;
+  border-color: transparent;
+}
+#toolbar button.select-mode.on {
+  color: var(--accent);
+  border-color: #4ea1ff66;
+}
+
+/* A remote tab whose session ended: reconnect, delete the machine, or close. */
+.remote-ended {
+  position: absolute;
+  left: 50%;
+  top: 40%;
+  transform: translate(-50%, -50%);
+  z-index: 12;
+  max-width: min(520px, calc(100% - 32px));
+  padding: 16px 20px;
+  border-radius: 8px;
+  background: #262626f2;
+  border: 1px solid var(--remote, var(--accent));
+  box-shadow: 0 6px 24px #000a;
+  color: var(--fg);
+  font: 13px -apple-system, system-ui, sans-serif;
+}
+.remote-ended strong {
+  display: block;
+  margin-bottom: 4px;
+}
+.remote-ended .buttons {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+  flex-wrap: wrap;
+}
+.remote-ended button {
+  font: inherit;
+  padding: 5px 12px;
+  border-radius: 5px;
+  border: 1px solid #555;
+  background: #333;
+  color: var(--fg);
+  cursor: pointer;
+}
+.remote-ended button.primary {
+  border-color: var(--remote, var(--accent));
+  background: color-mix(in srgb, var(--remote, var(--accent)) 30%, #333);
+}
+.remote-ended button.danger {
+  border-color: #ff6b6b88;
+  color: #ff8b8b;
 }

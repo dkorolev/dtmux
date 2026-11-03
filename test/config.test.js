@@ -48,7 +48,8 @@ test('a remote gets its defaults, with ~ expanded', () => {
   assert.ok(!r.seed.startsWith('~') && r.seed.endsWith('/.ssh/lunanode.seed'));
   assert.equal(r.plan, 'm.1s');
   assert.equal(r.ttlSeconds, 86400);
-  assert.equal(r.ipv4, true);
+  assert.equal(r.ipv4, false);
+  assert.equal(r.jump, null);
   assert.equal(r.user, 'ubuntu');
   assert.equal(r.identity, null);
   assert.match(r.attach, /tmux new-session -A/);
@@ -61,4 +62,14 @@ test('remote settings are checked strictly', () => {
   bad('remotes:\n  lunanode:\n    kind: lunanode-ctl\n', /"controller" is required[\s\S]*"seed" is required/);
   bad('remotes:\n  Luna_Node:\n    kind: x\n', /name must be lowercase/);
   bad('remotes: [1]', /remotes: must be a mapping/);
+});
+
+test('a devbox remote: its own keys, orange by default, address required', () => {
+  const r = parseConfig('remotes:\n  hetzner:\n    kind: devbox-ctl\n    controller: [ssh, devbox, devbox-ctl]\n    address: your.hetzner.dns.name\n').remotes.hetzner;
+  assert.equal(r.color, '#ff9f43');
+  assert.equal(r.address, 'your.hetzner.dns.name');
+  assert.equal(r.seed, undefined);
+  bad('remotes:\n  hetzner:\n    kind: devbox-ctl\n    controller: [ssh, devbox, devbox-ctl]\n', /"address" is required/);
+  bad('remotes:\n  hetzner:\n    kind: devbox-ctl\n    controller: [x]\n    address: h\n    seed: s\n', /unknown key "seed"/);
+  bad('remotes:\n  x:\n    kind: nope\n    controller: [x]\n', /kind: must be one of: lunanode-ctl, devbox-ctl/);
 });

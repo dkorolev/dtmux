@@ -8,14 +8,16 @@
 //                                         `remotes`: [{ name, label, color, plan, ttlSeconds }]
 //   state  { windows, panes }             after any structural change; each
 //                                         window carries its long id as `uid`, and
-//                                         `remote` { name, host } when it is on a VM
+//                                         `remote` { name, host, address, upSince, ended } when on
+//                                         a remote machine (ended: its session ended, the tab waits)
 //   init   { p, d }                       a pane's history and modes, base64
 //   out    { p, d }                       pane output, base64
 //   exit   { reason, sessionGone }        tmux detached or the session ended
 //   prompt { id, kind, prompts, inputs, single, numeric, confirmKey, enterConfirms }
 //                                         a binding wants an answer (see tmux-bindings.js)
-//   notice { text, kind? }                tmux messages, command output, things we undid
-//   journal { agent, command, dir, branch, commit, dirty }
+//   notice { text, kind?, p? }            tmux messages, command output, things we undid;
+//                                         with `p`, about that pane's tab (shown on it)
+//   journal { p, agent, command, dir, branch, commit, dirty }
 //                                         a resume command showed up on a pane
 //   saved  { windows: [{ id, name, dir, branch, agent, remote }] }
 //                                         windows saved when dtmux last stopped
@@ -33,9 +35,13 @@
 //   resume { id }          reopen a saved window: same name, same directory
 //   reorder { ws }         put tmux's windows in this order (window ids, a tab drag)
 //   info { w }             what the tab's tooltip shows, answered with
-//                          info { w, panes: [{ id, active, dir, openSecs, running }] }
+//                          info { w, panes: [{ id, active, dir, openSecs, running }], upSince }
+//                          (upSince: unix seconds a remote tab's VM has been up)
 //   disconnect { w }       save a window for later and close it: it turns dotted
+//   close { w }            close a window for good, no dotted tab (works on a stuck one)
 //   forget { id }          drop a saved window for good
+//   delete-remote { w } | { id }  delete a remote tab's machine (live window or
+//                          saved tab) and close the tab
 //   new-session            while idle: start the session empty
 //   stop                   stop the whole daemon
 //   restart                stop the daemon and start it again: windows saved, tmux ended
@@ -53,8 +59,9 @@ import { windowInfo } from './pane-info.js';
 import { closeAgents } from './agent-close.js';
 import { branchOf, restoreBranch } from './git-branch.js';
 import { savedFor, takeSaved, addSaved, savedEvents, newWindowId, ID_OPTION } from './saved-windows.js';
-import { REMOTE_OPTION, parseRemote, remoteValue, currentRemotes, newHost, remoteCommand } from './remotes.js';
+import { REMOTE_OPTION, REMOTE_UP_OPTION, REMOTE_FORMAT, REMOTE_SUBSCRIPTION, parseRemote, remoteValue, currentRemotes, newHost, remoteCommand } from './remotes.js';
 import { pageRemotes } from './remote-config.js';
+import { kindOf } from './remote-kinds.js';
 
 const HISTORY_LINES = 10000; // keep in sync with the browser's scrollback
 const SEND_CHUNK = 256; // bytes per send-keys command
@@ -65,7 +72,7 @@ const WINDOW_FORMAT = [
   '#{window_active}',
   '#{window_visible_layout}',
   `#{${ID_OPTION}}`,
-  `#{${REMOTE_OPTION}}`,
+  REMOTE_FORMAT,
   '#{window_name}',
 ].join('\t');
 const PANE_FORMAT = [
@@ -124,6 +131,23 @@ const pageEntry = ({ id, name, dir, branch, agent, remote }) => ({
   agent: agent ?? null,
   remote: remote ?? null,
 });
+
+// Delete a remote tab's machine for good; `send` reports how it went.
+function deleteMachine(where, send) {
+  let remote;
+  try {
+    remote = currentRemotes()[where.name];
+  } catch (err) {
+    return send({ t: 'notice', text: err.message, kind: 'bad' });
+  }
+  if (!remote) return send({ t: 'notice', text: `No remote "${where.name}" in ~/.dtmux.yaml: ${where.host} was not deleted.`, kind: 'bad' });
+  const kind = kindOf(remote);
+  send({ t: 'notice', text: `Deleting ${remote.label} ${kind.noun} ${where.host}…` });
+  kind.remove(remote, where.host).then(
+    () => send({ t: 'notice', text: `Deleted ${remote.label} ${kind.noun} ${where.host}.` }),
+    (err) => send({ t: 'notice', text: `Could not delete ${where.host}: ${err.message}`, kind: 'bad' }),
+  );
+}
 
 // The remotes for the page; none while ~/.dtmux.yaml is invalid.
 function remotesForPage() {
@@ -202,7 +226,13 @@ export function attachTmuxSession(ws, opts) {
         const entry = takeSaved(session, msg.id);
         if (entry) start(entry);
       } else if (msg.t === 'forget' && typeof msg.id === 'string') takeSaved(session, msg.id);
-      else if (msg.t === 'stop') onStop();
+      else if (msg.t === 'delete-remote' && typeof msg.id === 'string') {
+        const entry = savedFor(session).find((e) => e.id === msg.id);
+        if (entry?.remote) {
+          takeSaved(session, msg.id);
+          deleteMachine(entry.remote, send);
+        }
+      } else if (msg.t === 'stop') onStop();
       else if (msg.t === 'restart') onRestart();
       else if (msg.t === 'soft-restart') onSoftRestart();
     }
@@ -233,7 +263,17 @@ function bridge(ws, opts) {
   // Ahead of every other command, so the first window keeps its saved id.
   if (first) tmux.run(`set-option -w ${ID_OPTION} ${quote(first.id)}`);
   if (firstRemote) tmux.run(`set-option -w ${REMOTE_OPTION} ${quote(remoteValue(firstRemote))}`);
-  if (first?.agent) tmux.run('display -p "#{pane_id}"', (err, lines) => !err && typeAgent(lines[0], first.agent));
+  // The first window's notes belong to its tab (pane `p`), shown once it is there.
+  const firstNotes = [];
+  if (first && !firstRemote && firstDir !== first.dir)
+    firstNotes.push({ text: `${first.dir || 'The saved directory'} is gone; opened "${first.name}" in your home directory.`, kind: 'bad' });
+  if (firstBranchNote) firstNotes.push({ text: firstBranchNote, kind: /^Switched/.test(firstBranchNote) ? '' : 'bad' });
+  if (first?.agent || firstNotes.length)
+    tmux.run('display -p "#{pane_id}"', (err, lines) => {
+      if (err) return;
+      for (const n of firstNotes) send({ t: 'notice', ...n, p: lines[0] });
+      typeAgent(lines[0], first.agent);
+    });
   const panes = new Map(); // pane id -> { ready }
   const tails = new Map(); // pane id -> recent plain text, for resume hints
   const journaled = new Set(); // resume commands already shown this connection
@@ -258,7 +298,8 @@ function bridge(ws, opts) {
     noteResume(paneId, data);
   });
   tmux.on('notify', (name, rest) => {
-    if (STRUCTURAL.has(name)) scheduleRefresh();
+    // A remote tab's helper changed its window options (see remotes.js).
+    if (STRUCTURAL.has(name) || (name === 'subscription-changed' && rest.startsWith('dtmux-remote '))) scheduleRefresh();
     if (name === 'pane-mode-changed' && isPaneId(rest)) leaveMode(rest);
     if (name === 'message' || name === 'config-error')
       send({ t: 'notice', text: rest, kind: name === 'message' ? '' : 'bad' });
@@ -282,6 +323,7 @@ function bridge(ws, opts) {
   });
 
   tmux.run(`refresh-client -C ${cols}x${rows}`);
+  tmux.run(`refresh-client -B ${quote(REMOTE_SUBSCRIPTION)}`);
   tmux.run('display -p "#{client_name}\t#{prefix}"', (err, lines) => {
     if (err) return;
     const [name, prefix] = lines[0].split('\t');
@@ -296,9 +338,6 @@ function bridge(ws, opts) {
   loadBindings();
   refresh();
   for (const entry of reopen) openSaved(entry);
-  if (first && !firstRemote && firstDir !== first.dir)
-    send({ t: 'notice', text: `${first.dir || 'The saved directory'} is gone; opened "${first.name}" in your home directory.`, kind: 'bad' });
-  if (firstBranchNote) send({ t: 'notice', text: firstBranchNote, kind: /^Switched/.test(firstBranchNote) ? '' : 'bad' });
 
   function loadBindings() {
     tmux.run(`list-keys -T prefix -F ${quote('#{key_string}\t#{key_command}')}`, (err, lines) => {
@@ -435,7 +474,8 @@ function bridge(ws, opts) {
           uid = newWindowId();
           tmux.run(`set-option -w -t ${id} ${ID_OPTION} ${uid}`);
         }
-        return { id, uid, index: Number(index), active: active === '1', layout, remote: parseRemote(remote), name: name.join('\t') };
+        const where = parseRemote(remote); // upSince: null while the VM is being made
+        return { id, uid, index: Number(index), active: active === '1', layout, remote: where, name: name.join('\t') };
       });
       const list = p.lines.filter(Boolean).map((l) => {
         const [id, window, active, width, height, cmd] = l.split('\t');
@@ -562,10 +602,26 @@ function bridge(ws, opts) {
         if (isWindowId(msg.w)) disconnectWindow(msg.w);
         break;
       case 'info':
-        if (isWindowId(msg.w)) windowInfo(tmux, msg.w, (err, list) => !err && send({ t: 'info', w: msg.w, panes: list }));
+        if (isWindowId(msg.w))
+          tmux.run(`display -p -t ${msg.w} ${quote(`#{${REMOTE_UP_OPTION}}`)}`, (e, up) =>
+            windowInfo(tmux, msg.w, (err, list) => !err && send({ t: 'info', w: msg.w, panes: list, upSince: Number(up?.[0]) || null })),
+          );
         break;
       case 'forget':
         if (typeof msg.id === 'string') takeSaved(session, msg.id);
+        break;
+      case 'close':
+        if (isWindowId(msg.w)) closeWindow(msg.w);
+        break;
+      case 'delete-remote':
+        if (isWindowId(msg.w)) closeWindow(msg.w, { deleteMachine: true });
+        else if (typeof msg.id === 'string') {
+          const entry = savedFor(session).find((e) => e.id === msg.id);
+          if (entry?.remote) {
+            takeSaved(session, msg.id);
+            deleteMachine(entry.remote, send);
+          }
+        }
         break;
       case 'stop':
         onStop();
@@ -586,7 +642,7 @@ function bridge(ws, opts) {
   const closing = new Set();
   function disconnectWindow(w) {
     if (closing.has(w)) return;
-    const format = ['#{window_id}', `#{${ID_OPTION}}`, '#{automatic-rename}', '#{pane_current_path}', `#{${REMOTE_OPTION}}`, '#{window_name}'].join('\t');
+    const format = ['#{window_id}', `#{${ID_OPTION}}`, '#{automatic-rename}', '#{pane_current_path}', REMOTE_FORMAT, '#{window_name}'].join('\t');
     tmux.run(`display -p -t ${w} ${quote(format)}`, async (err, lines) => {
       if (err || !lines[0]) return;
       const [id, uid, auto, dir, remoteVal, ...name] = lines[0].split('\t');
@@ -613,6 +669,22 @@ function bridge(ws, opts) {
     });
   }
 
+  // Close a window for good: no dotted tab. From outside the window, so a
+  // stuck one (a frozen ssh, say) closes too. `deleteMachine`: also delete
+  // the remote machine the window was on.
+  function closeWindow(w, { deleteMachine: alsoDelete = false } = {}) {
+    tmux.run(`display -p -t ${w} ${quote(`#{window_id}\t${REMOTE_FORMAT}`)}`, (err, lines) => {
+      if (err || !lines[0]) return;
+      const [id, remoteVal] = lines[0].split('\t');
+      if (id !== w) return; // tmux fell back to another window: not ours to close
+      const where = parseRemote(remoteVal);
+      execFile(TMUX_BIN, tmuxArgs('kill-window', '-t', w), (e, _o, stderr) => {
+        if (e && !/can't find window/.test(stderr)) send({ t: 'notice', text: `Could not close the window: ${stderr.trim() || e.message}`, kind: 'bad' });
+      });
+      if (alsoDelete && where) deleteMachine(where, send);
+    });
+  }
+
   // Type an agent's resume command into a fresh pane's shell, as you would.
   function typeAgent(pane, agent) {
     if (!isPaneId(pane) || !agent?.command) return;
@@ -628,13 +700,13 @@ function bridge(ws, opts) {
   function openSaved(entry) {
     if (entry.remote) return openRemote(entry.remote, entry.id, entry.name);
     let dir = entry.dir;
+    let note = null; // about the new tab: shown on it (pane `p`)
     if (!isDir(dir)) {
-      send({ t: 'notice', text: `${dir || 'The saved directory'} is gone; opened "${entry.name}" in your home directory.`, kind: 'bad' });
+      note = { text: `${dir || 'The saved directory'} is gone; opened "${entry.name}" in your home directory.`, kind: 'bad' };
       dir = os.homedir();
-    }
-    else {
-      const note = restoreBranch(dir, entry.branch, openDirs());
-      if (note) send({ t: 'notice', text: note, kind: /^Switched/.test(note) ? '' : 'bad' });
+    } else {
+      const text = restoreBranch(dir, entry.branch, openDirs());
+      if (text) note = { text, kind: /^Switched/.test(text) ? '' : 'bad' };
     }
     const name = entry.autoName ? '' : ` -n ${quote(entry.name)}`;
     // One command list, so the id is on the window before anyone lists it.
@@ -642,8 +714,9 @@ function bridge(ws, opts) {
     tmux.runList(
       [`new-window -P -F "#{pane_id}" -c ${quote(dir)}${name}`, `set-option -w ${ID_OPTION} ${quote(entry.id)}`],
       ([made]) => {
-        if (made.err) send({ t: 'notice', text: `Could not reopen "${entry.name}": ${made.err.message}`, kind: 'bad' });
-        else typeAgent(made.lines[0], entry.agent);
+        if (made.err) return send({ t: 'notice', text: `Could not reopen "${entry.name}": ${made.err.message}`, kind: 'bad' });
+        if (note) send({ t: 'notice', ...note, p: made.lines[0] });
+        typeAgent(made.lines[0], entry.agent);
       },
     );
   }
@@ -705,7 +778,7 @@ function bridge(ws, opts) {
     journaled.add(hint.command);
     tmux.run(`display -p -t ${paneId} "#{pane_current_path}"`, (err, lines) => {
       const cwd = err ? '' : lines[0];
-      send({ t: 'journal', agent: hint.agent, command: hint.command, ...placeOf(cwd) });
+      send({ t: 'journal', p: paneId, agent: hint.agent, command: hint.command, ...placeOf(cwd) });
     });
   }
 

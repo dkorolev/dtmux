@@ -19,6 +19,10 @@ export function createTerminal({ cols, rows, scrollback = SCROLLBACK, openExtern
     scrollback,
     allowProposedApi: true,
     vtExtensions: { kittyKeyboard: true },
+    // Option+drag always selects text here, even while the program in the
+    // terminal takes the mouse (and the page's plain selection relies on it).
+    macOptionClickForcesSelection: true,
+    altClickMovesCursor: false,
     // OSC 8 hyperlinks (e.g. `ls --hyperlink`).
     linkHandler: { activate: (_event, url) => openExternal(url) },
     theme: { background: '#1e1e1e' },
