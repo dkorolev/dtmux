@@ -5,10 +5,21 @@
 // blocks, in the order the commands were sent. A block's third field is 1 when
 // the command came from this client and 0 when tmux ran it on its own (for
 // example a key binding), so only flag-1 blocks are matched to callbacks.
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 
-export const TMUX_BIN = process.env.TMUX_BIN || 'tmux';
+// dtmux's own copy of tmux, when macos/install.sh made one. macOS treats a
+// tmux server as a program of its own when it asks for privacy permissions
+// ("tmux would like to access data from other apps"), so with a copy of
+// its own, what you allow dtmux's tmux is allowed to dtmux alone, not to
+// every tmux. DTMUX_TMUX_BIN overrides it. (Not TMUX_BIN: an older login
+// setup put that in dtmux's environment, from where it reached every shell
+// in its tabs, and so every `dtmux` typed there.)
+export const OWN_TMUX = path.join(os.homedir(), 'Library', 'Application Support', 'dtmux', 'dtmux-tmux');
+export const TMUX_BIN = process.env.DTMUX_TMUX_BIN || (fs.existsSync(OWN_TMUX) ? OWN_TMUX : 'tmux');
 
 // dtmux runs its own tmux server (`tmux -L <socket>`), apart from any tmux the
 // user runs by hand, so stopping dtmux can take down exactly its sessions.

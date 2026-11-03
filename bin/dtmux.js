@@ -80,7 +80,7 @@ async function probe(port) {
 // Inherited variables change how shells behave: zsh, for one, picks vi
 // keybindings at startup when EDITOR mentions vi, and then Backspace cannot
 // delete text the line had before you entered insert mode.
-const KEEP_ENV = ['HOME', 'USER', 'LOGNAME', 'SHELL', 'PATH', 'TMPDIR', 'SSH_AUTH_SOCK', 'TMUX_BIN'];
+const KEEP_ENV = ['HOME', 'USER', 'LOGNAME', 'SHELL', 'PATH', 'TMPDIR', 'SSH_AUTH_SOCK'];
 function daemonEnv() {
   const env = { LANG: 'en_US.UTF-8' }; // tmux mangles non-ASCII text without a UTF-8 locale
   for (const [k, v] of Object.entries(process.env)) {

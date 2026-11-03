@@ -134,15 +134,27 @@ remotes:
   from there. Either way they come back as dotted tabs. Programs and
   scrollback on this machine do not survive a reboot; remote tabs do, since
   their shells run in the VM's tmux.
-- **Starting at login, stopping before logout** (macOS): `sh macos/install.sh`
-  installs two LaunchAgents. `com.dima.dtmux` runs `dtmux start` once at
-  login. `com.dima.dtmux.guard` runs DtmuxGuard.app (`macos/DtmuxGuard.swift`),
-  an invisible app that macOS asks to quit before a logout, restart or
-  shutdown. It holds that until `dtmux kill` has stopped gently (coding
-  agents closed with Ctrl+C and their exact resume commands written down,
-  windows saved), at most 25 s, so nothing is left to the moment when every
-  process gets SIGTERM at once. If the logout is then cancelled, it starts
-  dtmux again a minute later.
+- **dtmux.app: login, logout and permissions** (macOS). `sh macos/install.sh`
+  installs `dtmux.app` (`macos/dtmux-app.swift`), an invisible app the
+  LaunchAgent `com.dima.dtmux` runs at login to start dtmux, and
+  `dtmux-tmux`, dtmux's own copy of the installed tmux, both in
+  `~/Library/Application Support/dtmux/`. macOS asks for privacy
+  permissions ("tmux would like to access data from other apps") on behalf
+  of the tmux server, so dtmux runs its tmux as `dtmux-tmux`: give that,
+  and `dtmux.app`, Full Disk Access once (System Settings > Privacy &
+  Security > Full Disk Access > +) and nothing in dtmux asks again, while
+  any other tmux on the Mac gets no more than before. Running `install.sh`
+  again keeps both, and so their permissions, unless the app's source or
+  the installed tmux changed. The permissions apply to the tmux server
+  started after they were given: at the next login, or now with `dtmux
+  kill` and then `launchctl kickstart -k gui/$(id -u)/com.dima.dtmux`.
+  `DTMUX_TMUX_BIN` makes dtmux use another tmux.
+  Before a logout, restart or shutdown, macOS asks the app to quit; it holds
+  that until `dtmux kill` has stopped gently (coding agents closed with
+  Ctrl+C and their exact resume commands written down, windows saved), at
+  most 25 s, so nothing is left to the moment when every process gets
+  SIGTERM at once. If the logout is then cancelled, it starts dtmux again a
+  minute later.
 
 ## Popups
 

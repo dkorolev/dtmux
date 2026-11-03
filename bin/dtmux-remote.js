@@ -24,6 +24,7 @@ import { STATE_DIR } from '../server/paths.js';
 import { shellQuote } from '../server/agent-resume.js';
 import { kindOf, mux, MUX_DIR, transient } from '../server/remote-kinds.js';
 import { recordMachine, dropMachine } from '../server/machine-ledger.js';
+import { TMUX_BIN } from '../server/tmux-control.js';
 
 const [name, firstHost, ...flags] = process.argv.slice(2);
 const flag = (f) => (flags.includes(f) ? flags[flags.indexOf(f) + 1] ?? null : null);
@@ -131,7 +132,7 @@ function adopt(newHost) {
 // A command on this tab's own window, in dtmux's tmux.
 function tmux(cmd, ...args) {
   const pane = process.env.TMUX_PANE;
-  if (pane) spawnSync(process.env.TMUX_BIN || 'tmux', [cmd, '-t', pane, ...args], { stdio: 'ignore' });
+  if (pane) spawnSync(TMUX_BIN, [cmd, '-t', pane, ...args], { stdio: 'ignore' });
 }
 
 // ssh into the machine's tmux until its shell ends, connecting again when

@@ -1,22 +1,27 @@
-// DtmuxGuard: stops dtmux gently before macOS logs out, restarts or shuts down.
+// dtmux.app: dtmux's face to macOS. Run at login by a LaunchAgent, it
 //
-// At a reboot every process gets SIGTERM at about the same time, so coding
-// agents in dtmux's tabs would die before dtmux could close them the way a
-// person does (Ctrl+C) and catch their resume lines. This invisible app is
-// asked to quit before that happens (loginwindow asks every app first), and
-// holds the logout until `dtmux kill` has finished its full stop: agents
-// closed, resume commands and windows written down, tmux ended. Then it lets
-// the logout go on. If the logout is cancelled after all, it starts dtmux
-// again a minute later.
+// 1. starts dtmux (`dtmux start`), so the daemon, its tmux and every shell
+//    in it run on this app's behalf: macOS privacy permissions (Full Disk
+//    Access, Documents, other apps' data...) granted to dtmux.app cover them
+//    all, without granting anything to node itself;
+// 2. stops dtmux gently before macOS logs out, restarts or shuts down. At a
+//    reboot every process gets SIGTERM at about the same time, so coding
+//    agents in dtmux's tabs would die before dtmux could close them the way
+//    a person does (Ctrl+C) and catch their resume lines. This invisible app
+//    is asked to quit before that happens (loginwindow asks every app first),
+//    and holds the logout until `dtmux kill` has finished its full stop:
+//    agents closed, resume commands and windows written down, tmux ended.
+//    Then it lets the logout go on. If the logout is cancelled after all, it
+//    starts dtmux again a minute later.
 //
-// Built and installed by macos/install.sh; run at login by a LaunchAgent.
-// Arguments: <node> <path to bin/dtmux.js>. The environment (DTMUX_*) is
-// passed on, so a test instance can be guarded the same way.
+// Built and installed by macos/install.sh. Arguments: <node> <path to
+// bin/dtmux.js>. The environment (DTMUX_*) is passed on, so a test instance
+// can be run the same way.
 import AppKit
 
 let args = CommandLine.arguments
 guard args.count >= 3 else {
-  FileHandle.standardError.write("usage: DtmuxGuard <node> <dtmux.js>\n".data(using: .utf8)!)
+  FileHandle.standardError.write("usage: dtmux <node> <dtmux.js>\n".data(using: .utf8)!)
   exit(2)
 }
 let node = args[1]
@@ -43,6 +48,9 @@ final class Guard: NSObject, NSApplicationDelegate {
   var stopping = false
 
   func applicationDidFinishLaunching(_ n: Notification) {
+    // Started by this app, dtmux runs with its permissions. Already running
+    // (started some other way): left as it is.
+    runDtmux("start") { status in log("dtmux start: exit \(status)") }
     log("watching for logout, restart and shutdown")
     // Posted when the user asks to log out, restart or shut down: start the
     // stop right away, before the apps are even asked to quit.
