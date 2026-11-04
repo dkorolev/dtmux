@@ -145,10 +145,28 @@ remotes:
   Security > Full Disk Access > +) and nothing in dtmux asks again, while
   any other tmux on the Mac gets no more than before. Running `install.sh`
   again keeps both, and so their permissions, unless the app's source or
-  the installed tmux changed. The permissions apply to the tmux server
-  started after they were given: at the next login, or now with `dtmux
-  kill` and then `launchctl kickstart -k gui/$(id -u)/com.dima.dtmux`.
-  `DTMUX_TMUX_BIN` makes dtmux use another tmux.
+  the installed tmux changed. `DTMUX_TMUX_BIN` makes dtmux use another tmux.
+
+  Once, after the first `install.sh`:
+
+  1. Open the folder and the Full Disk Access list (Finder hides
+     `~/Library`, so go there with `open`, or with Cmd+Shift+G in a file
+     picker):
+     ```sh
+     open "$HOME/Library/Application Support/dtmux"
+     open "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"
+     ```
+  2. Drag `dtmux-tmux` and `dtmux` (the app) from that Finder window into
+     the list, and check that both are switched on.
+  3. Restart dtmux from the app, so its tmux server is `dtmux-tmux`. A soft
+     restart is not enough: it keeps the tmux server that was running. This
+     ends the shells in local tabs; they come back as dotted tabs, and
+     remote tabs reconnect.
+     ```sh
+     dtmux kill && launchctl kickstart -k gui/$(id -u)/com.dima.dtmux
+     ```
+  4. Check: `ps -axo args | grep '[d]tmux-tmux'` shows the tmux server as
+     `…/dtmux-tmux -L dtmux …`, not `/opt/homebrew/bin/tmux`.
   Before a logout, restart or shutdown, macOS asks the app to quit; it holds
   that until `dtmux kill` has stopped gently (coding agents closed with
   Ctrl+C and their exact resume commands written down, windows saved), at

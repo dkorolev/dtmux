@@ -108,6 +108,8 @@ for try in 1 2 3 4 5 6 7 8 9 10; do
   sleep 1
 done
 echo "installed: $LABEL runs $APP at login"
-echo "Give both Full Disk Access once: System Settings > Privacy & Security > Full Disk Access > +, then:"
-echo "  $APP"
-echo "  $OWN_TMUX"
+echo "Once: give dtmux-tmux and dtmux (the app) Full Disk Access by dragging them"
+echo "from the Finder window into the list, then restart dtmux from the app:"
+echo "  open \"\$HOME/Library/Application Support/dtmux\""
+echo "  open \"x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles\""
+echo "  dtmux kill && launchctl kickstart -k gui/\$(id -u)/com.dima.dtmux"
