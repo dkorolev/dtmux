@@ -85,15 +85,29 @@ remotes:
   devbox accounts are deleted after 24 hours with no change in their home,
   so a connected tab touches `~/.dtmux-alive` there every 30 minutes. A tab
   whose machine is gone says so and offers to make a new one.
+- **Panes are the machine's.** In a remote tab, splitting (with any key or
+  command bound to `split-window`) splits the machine's own tmux, side by
+  side or one above the other as asked, in the directory you are in there;
+  no shell starts on this Mac. Prefix keys bound to moving between panes
+  (`select-pane -L/-R/-U/-D`, `select-pane -t :.+`, `last-pane`), zooming
+  (`resize-pane -Z`) and closing one (`kill-pane`, after the page asks) act
+  there too, whatever keys they are on. The last pane is kept: deleting the
+  machine is the tab menu's. How: dtmux types made-up keys into the tab,
+  which the machine's tmux is set up to read as those commands (the default
+  `attach` command, so a tab gets them when it next connects); a split
+  made here is undone at once by a hook (`after-split-window[77]`). See
+  `server/remote-keys.js`.
 - **Delete, not close.** A remote tab has no Close: right-click it for
-  **Delete the VM / account…** (live or dotted), which asks, then deletes
-  the machine, and the tab goes with it. It works on a stuck tab too.
+  **Delete the VM / account…** (live or dotted), which deletes the machine,
+  and the tab goes with it. It works on a stuck tab too. Every delete asks
+  you to type four random digits it shows, then **Confirm delete** (or
+  Enter); a single press of Enter on a red button is not enough.
   **Disconnect** keeps the machine, with a dotted tab to join it again.
 - **Ctrl+D deletes.** When the last shell on the machine exits (its tmux
   ends), the machine is deleted and the tab closes. If the machine's tmux was
   only detached, or cannot be asked, nothing is deleted: the tab stays with
   **Reconnect** and **Delete the VM… / account…** (the terminal takes Enter
-  and `d` for the same), as it does when the connection is down and you
+  and `d` for the same; `d` then asks for the four digits too), as it does when the connection is down and you
   press Ctrl+C. The page hears of it at once through a tmux format
   subscription on the window option `@dtmux_remote_state`.
 - **No machine is left behind.** Every machine dtmux makes is recorded in
@@ -113,15 +127,16 @@ remotes:
 - dtmux talks to its own tmux server (`tmux -L dtmux`), separate from any tmux
   you run by hand. It still reads your `~/.tmux.conf`. To look at its sessions
   from a shell, run `tmux -L dtmux ls`.
-- `dtmux kill`, a plain `kill <pid>` (SIGTERM, or SIGINT), or the Restart
-  button in the page first saves every tmux window of every session (name,
+- `dtmux kill`, a plain `kill <pid>` (SIGTERM, or SIGINT), or a hard restart
+  from the page first saves every tmux window of every session (name,
   directory, tab order, and a long unique id kept in the window option
   `@dtmux_id`), then closes the browser connections, runs
   `tmux -L dtmux kill-server` (the shells in its panes get SIGHUP), removes the
-  pid file and exits. Restart › Full restart does that and then starts a new
+  pid file and exits. Hard restart (right-click the blue `dtmux` at the top
+  right) does that and then starts a new
   daemon on the same port, running the code as it is on disk; open pages
   reconnect by themselves.
-- Restart › Soft restart starts the new daemon without touching tmux: every
+- Soft restart, in the same menu, starts the new daemon without touching tmux: every
   session, window and shell keeps running, and open pages reattach with
   their terminals still on screen. The panes' kitty keyboard state (which
   keeps Shift+Enter working in Claude Code) is handed to the new daemon in
@@ -190,7 +205,8 @@ disagreeing about it.
 
 ## Text selection
 
-The toggle left of `dtmux` switches how a drag in a terminal works.
+Right-click the blue `dtmux` at the top right (or long-press it) to choose
+how a drag in a terminal works; the same menu has the soft and hard restarts.
 **Smart**: programs that ask for the mouse (tmux, vim, coding agents) get the
 clicks and drags. **Plain**: the page selects the text itself, instantly, for
 Cmd+C, whatever the program wants; the wheel still goes to the program. In
@@ -204,7 +220,7 @@ selecting, a round trip away. Option+drag selects text in either mode.
 ### A soft restart is always enough
 
 Any change to dtmux itself (server, page, dependencies) is picked up by a
-soft restart; a full restart is only for tmux itself (a new tmux binary, or
+soft restart; a hard restart is only for tmux itself (a new tmux binary, or
 a fresh tmux server environment). Three things keep it that way:
 
 - The page reloads itself when it reconnects to a daemon serving different
@@ -239,7 +255,7 @@ in-memory daemon state that is not in tmux, on disk, or in the hand-over.
   the dotted tabs, with nothing running. On a dotted tab, Reopen starts it
   and Forget removes it for good.
 - Coding agents come back where they were. When a window with Claude Code,
-  Codex or the Cursor agent closes (Disconnect, Full restart, `dtmux kill`),
+  Codex or the Cursor agent closes (Disconnect, Hard restart, `dtmux kill`),
   dtmux first asks the agent to quit (Ctrl+C until it leaves) and catches
   the resume line it prints, then saves it with the window's directory and
   git branch. Tapping the dotted tab opens the window there, switches the

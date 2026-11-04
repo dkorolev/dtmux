@@ -67,7 +67,7 @@ export function startTmuxMode({ container, toolbar, params }) {
         stage.querySelector('.tmux-overlay')?.remove();
       }
       retry = null;
-      restartButton.disabled = false; // "+" waits for hello: an idle page has no session yet
+      canRestart = true; // "+" waits for hello: an idle page has no session yet
       toolbar.setStatus('connected', 'ok');
     };
     ws.onclose = (ev) => {
@@ -95,7 +95,7 @@ export function startTmuxMode({ container, toolbar, params }) {
           toolbar.setStatus(params.get('session') ? `dtmux · ${msg.session}` : 'dtmux', 'brand');
           const commit = msg.commit || document.getElementById('status').dataset.commit;
           toolbar.setTitle(
-            `tmux session "${msg.session}" · prefix ${prefix ?? 'none'} · ${grid.cols}×${grid.rows}${commit ? ` · ${commit}` : ''}`,
+            `tmux session "${msg.session}" · prefix ${prefix ?? 'none'} · ${grid.cols}×${grid.rows}${commit ? ` · ${commit}` : ''}\nRight-click: selection mode, restart`,
           );
           break;
         case 'state':
@@ -167,7 +167,7 @@ export function startTmuxMode({ container, toolbar, params }) {
       // panes come back and these terminals pick up where they were.
       resetView({ keepPanes: true });
       newWindowButton.disabled = true;
-      restartButton.disabled = true;
+      canRestart = false;
       const restarting = reason === 'dtmux restarting';
       const stopped = reason === 'dtmux stopping';
       toolbar.setStatus(restarting ? 'restarting…' : stopped ? 'stopped' : 'reconnecting…', restarting ? '' : 'bad');
@@ -262,7 +262,7 @@ export function startTmuxMode({ container, toolbar, params }) {
     savedWindows = [];
     pending.clear();
     newWindowButton.disabled = true;
-    restartButton.disabled = true;
+    canRestart = false;
     toolbar.setStatus('open elsewhere', 'bad');
     const box = document.createElement('div');
     box.className = 'tmux-overlay taken';
@@ -285,7 +285,7 @@ export function startTmuxMode({ container, toolbar, params }) {
   function showEnded(status, text, label) {
     resetView();
     newWindowButton.disabled = true;
-    restartButton.disabled = true;
+    canRestart = false;
     toolbar.setStatus(status, 'bad');
     const box = document.createElement('div');
     box.className = 'tmux-overlay';
@@ -564,8 +564,7 @@ export function startTmuxMode({ container, toolbar, params }) {
     };
     button('Reconnect', 'primary', () => send({ t: 'in', p: pane.id, d: '\r' }));
     button(`Delete the ${r.noun}…`, 'danger', () => {
-      if (confirm(`Delete ${r.label} ${r.noun} ${w.remote.host} for good?\n\nEverything on it is lost, and this tab closes.`))
-        send({ t: 'close', w: w.id });
+      confirmDelete(r, w.remote.host, () => send({ t: 'close', w: w.id }));
     });
     box.append(title, info, row);
     winEl.append(box);
@@ -1021,6 +1020,75 @@ export function startTmuxMode({ container, toolbar, params }) {
 
   // A remote tab has no Close: a tab gone for good takes its machine with
   // it, so the one item says so. Asks first.
+  // Deleting a machine cannot be undone, so it takes typing four random
+  // digits shown in the dialog, not just a press of Enter on a red button.
+  // The digits and Enter are enough; Esc, Cancel or a click outside keep it.
+  function confirmDelete(r, host, run) {
+    document.querySelector('.confirm-delete')?.remove();
+    const code = String(Math.floor(Math.random() * 10000)).padStart(4, '0');
+    const thing = r.fullNoun ?? r.noun;
+    const shade = document.createElement('div');
+    shade.className = 'confirm-delete';
+    const box = document.createElement('div');
+    box.className = 'box';
+    box.setAttribute('role', 'dialog');
+    box.setAttribute('aria-modal', 'true');
+    const title = document.createElement('strong');
+    title.textContent = `Delete ${r.label} ${thing} ${host}?`;
+    const text = document.createElement('p');
+    text.textContent = `To confirm deleting this ${thing} type in the following four digits below, and press "Confirm delete".`;
+    const note = document.createElement('p');
+    note.className = 'note';
+    note.textContent = 'Everything on it is lost, and its tab goes away.';
+    const digits = document.createElement('div');
+    digits.className = 'digits';
+    digits.textContent = code;
+    const input = document.createElement('input');
+    input.inputMode = 'numeric';
+    input.autocomplete = 'off';
+    input.maxLength = 4;
+    input.placeholder = '····';
+    input.setAttribute('aria-label', 'The four digits');
+    const row = document.createElement('div');
+    row.className = 'buttons';
+    const cancel = document.createElement('button');
+    cancel.textContent = 'Cancel';
+    const ok = document.createElement('button');
+    ok.className = 'danger';
+    ok.textContent = 'Confirm delete';
+    ok.disabled = true;
+    row.append(cancel, ok);
+    box.append(title, text, digits, input, note, row);
+    shade.append(box);
+    document.body.append(shade);
+    const close = () => {
+      shade.remove();
+      panes.get(activePane)?.term.focus();
+    };
+    const matches = () => input.value.replace(/\D/g, '') === code;
+    input.addEventListener('input', () => {
+      ok.disabled = !matches();
+      input.classList.toggle('wrong', input.value.replace(/\D/g, '').length >= 4 && !matches());
+    });
+    const confirm_ = () => {
+      if (!matches()) return input.focus();
+      close();
+      run();
+    };
+    ok.addEventListener('click', confirm_);
+    cancel.addEventListener('click', close);
+    shade.addEventListener('mousedown', (e) => e.target === shade && close());
+    box.addEventListener('keydown', (e) => {
+      e.stopPropagation(); // not for the terminal or the page's own keys
+      if (e.key === 'Escape') close();
+      else if (e.key === 'Enter' && e.target === input) {
+        e.preventDefault();
+        confirm_();
+      }
+    });
+    setTimeout(() => input.focus()); // after a menu hands focus back to the terminal
+  }
+
   function deleteRemoteItem(t) {
     const r = remoteOf(t.w);
     const what = `${r.label} ${r.noun} ${t.w.remote.host}`;
@@ -1028,26 +1096,62 @@ export function startTmuxMode({ container, toolbar, params }) {
       `Delete the ${r.noun}…`,
       `Delete ${what}; this tab goes with it`,
       () => {
-        if (confirm(`Delete ${what} for good?\n\nEverything on it is lost, and this tab goes away.`))
-          send(t.kind === 'live' ? { t: 'close', w: t.w.id } : { t: 'forget', id: t.key });
+        confirmDelete(r, t.w.remote.host, () => send(t.kind === 'live' ? { t: 'close', w: t.w.id } : { t: 'forget', id: t.key }));
       },
       '#ff6b6b',
     ];
   }
 
-  // A small menu at (x, y): items are [label, title, action, color?].
+  // Right-click on `el`, or a long press on a touch screen, runs `open`.
+  function onMenuGesture(el, open) {
+    el.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      open();
+    });
+    let pressTimer = null;
+    el.addEventListener('pointerdown', (e) => {
+      if (e.pointerType === 'mouse') return;
+      pressTimer = setTimeout(() => {
+        pressTimer = null;
+        open();
+        const eat = (ev) => (ev.preventDefault(), ev.stopPropagation());
+        window.addEventListener('click', eat, { capture: true, once: true });
+      }, 500);
+    });
+    for (const ev of ['pointerup', 'pointercancel', 'pointerleave']) el.addEventListener(ev, () => clearTimeout(pressTimer));
+  }
+
+  // A small menu at (x, y): items are [label, title, action, color?,
+  // checked?], or null for a separator. With any `checked` given, every item
+  // gets a column for the checkmark.
   function showMenu(items, x, y) {
     closeTabMenu();
     hideTip();
     const menu = document.createElement('div');
     menu.className = 'tab-menu';
     menu.setAttribute('role', 'menu');
-    for (const [label, title, run, color] of items) {
+    const checkable = items.some((item) => item && item[4] !== undefined);
+    for (const item of items) {
+      if (!item) {
+        menu.append(document.createElement('hr'));
+        continue;
+      }
+      const [label, title, run, color, checked] = item;
       const b = document.createElement('button');
       b.textContent = label;
+      if (checkable) {
+        const mark = document.createElement('span');
+        mark.className = 'check';
+        mark.textContent = checked ? '✓' : '';
+        b.prepend(mark);
+      }
+      if (checked !== undefined) {
+        b.setAttribute('role', 'menuitemradio');
+        b.setAttribute('aria-checked', String(checked));
+      }
       b.title = title;
       if (color) b.style.color = color;
-      b.setAttribute('role', 'menuitem');
+      if (!b.hasAttribute('role')) b.setAttribute('role', 'menuitem');
       b.addEventListener('click', () => {
         closeTabMenu();
         run();
@@ -1214,22 +1318,7 @@ export function startTmuxMode({ container, toolbar, params }) {
       r.bottom + 4,
     );
   }
-  newWindowButton.addEventListener('contextmenu', (e) => {
-    e.preventDefault();
-    showNewMenu();
-  });
-  let pressTimer = null;
-  newWindowButton.addEventListener('pointerdown', (e) => {
-    if (e.pointerType === 'mouse') return;
-    pressTimer = setTimeout(() => {
-      pressTimer = null;
-      showNewMenu();
-      const eat = (ev) => (ev.preventDefault(), ev.stopPropagation());
-      window.addEventListener('click', eat, { capture: true, once: true });
-    }, 500);
-  });
-  for (const ev of ['pointerup', 'pointercancel', 'pointerleave'])
-    newWindowButton.addEventListener(ev, () => clearTimeout(pressTimer));
+  onMenuGesture(newWindowButton, showNewMenu);
   function newRemote(name) {
     const r = remotes.find((x) => x.name === name);
     if (!r) return;
@@ -1269,32 +1358,20 @@ export function startTmuxMode({ container, toolbar, params }) {
       );
     }, 3000);
   }
-  const restartButton = toolbar.addButton(
-    '↻ Restart',
-    () => {
-      const r = restartButton.getBoundingClientRect();
-      showMenu(
-        [
-          ['Soft restart', 'Restart dtmux only: tmux and every shell keep running', () => askRestart('soft-restart')],
-          [
-            'Full restart…',
-            'Save the windows as dotted tabs and end tmux with every shell in it',
-            () => {
-              const ok = confirm(
-                'Full restart of dtmux?\n\nEvery shell and program in it ends. The windows are saved and come back as dotted tabs: tap one to reopen it.',
-              );
-              if (ok) askRestart('restart');
-            },
-          ],
-        ],
-        r.right,
-        r.bottom + 4,
-      );
-    },
-    { title: 'Restart dtmux with the code on disk now' },
-  );
-  restartButton.classList.add('restart');
-  restartButton.disabled = true;
+  let canRestart = false; // connected to a daemon
+  const restartItems = () => [
+    ['Soft restart', 'Restart dtmux only: tmux and every shell keep running', () => askRestart('soft-restart')],
+    [
+      'Hard restart…',
+      'Save the windows as dotted tabs and end tmux with every shell in it',
+      () => {
+        const ok = confirm(
+          'Hard restart of dtmux?\n\nEvery shell and program in it ends. The windows are saved and come back as dotted tabs: tap one to reopen it.',
+        );
+        if (ok) askRestart('restart');
+      },
+    ],
+  ];
 
   // Text selection. Smart: mouse events go to the program in the terminal
   // when it asks for them (tmux, vim, an agent's UI), so selecting is theirs.
@@ -1307,24 +1384,37 @@ export function startTmuxMode({ container, toolbar, params }) {
   try {
     plainSelect = localStorage.getItem(SELECT_KEY) === '1';
   } catch {}
-  const selectButton = toolbar.addButton('', () => {
-    plainSelect = !plainSelect;
+  function setPlainSelect(on) {
+    plainSelect = on;
     try {
       localStorage.setItem(SELECT_KEY, plainSelect ? '1' : '0');
     } catch {}
-    showSelectMode();
-    panes.get(activePane)?.term.focus();
-  });
-  selectButton.classList.add('select-mode');
-  document.getElementById('status').before(selectButton);
-  function showSelectMode() {
-    selectButton.textContent = plainSelect ? 'select: plain' : 'select: smart';
-    selectButton.classList.toggle('on', plainSelect);
-    selectButton.title = plainSelect
-      ? 'Plain text selection: dragging selects text here, instantly, for Cmd+C; programs get no clicks. Click for smart.'
-      : 'Smart selection: programs that use the mouse (tmux, vim, agents) get clicks and drags. Option+drag still selects text. Click for plain.';
   }
-  showSelectMode();
+  const selectItems = () => [
+    [
+      'Smart selection',
+      'Programs that use the mouse (tmux, vim, agents) get clicks and drags. Option+drag still selects text.',
+      () => setPlainSelect(false),
+      '',
+      !plainSelect,
+    ],
+    [
+      'Plain selection',
+      'Dragging selects text here, instantly, for Cmd+C; programs get no clicks.',
+      () => setPlainSelect(true),
+      '',
+      plainSelect,
+    ],
+  ];
+
+  // Right-click on the dtmux label (or a long press): how selecting works,
+  // and the restarts.
+  const statusEl = document.getElementById('status');
+  function showStatusMenu() {
+    const r = statusEl.getBoundingClientRect();
+    showMenu([...selectItems(), ...(canRestart ? [null, ...restartItems()] : [])], r.right, r.bottom + 4);
+  }
+  onMenuGesture(statusEl, showStatusMenu);
   // The press, the movement and the release of a drag all go with Option,
   // or the program still gets the motion (and the selection is cut short).
   // Plain hover motion over a terminal too: programs get no mouse at all.

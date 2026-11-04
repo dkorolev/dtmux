@@ -63,6 +63,7 @@ import { branchOf, restoreBranch } from './git-branch.js';
 import { savedFor, takeSaved, addSaved, savedEvents, newWindowId, ID_OPTION } from './saved-windows.js';
 import { REMOTE_OPTION, REMOTE_UP_OPTION, REMOTE_FORMAT, REMOTE_SUBSCRIPTION, parseRemote, remoteValue, currentRemotes, newHost, remoteCommand } from './remotes.js';
 import { pageRemotes } from './remote-config.js';
+import { SPLIT_HOOK, remoteAction, actionKeys } from './remote-keys.js';
 import { kindOf } from './remote-kinds.js';
 import { dropMachine } from './machine-ledger.js';
 
@@ -326,6 +327,9 @@ function bridge(ws, opts) {
 
   tmux.run(`refresh-client -C ${cols}x${rows}`);
   tmux.run(`refresh-client -B ${quote(REMOTE_SUBSCRIPTION)}`);
+  // Splitting a remote tab splits on its machine (see remote-keys.js). Its own
+  // slot in the hook array, so a hook of your ~/.tmux.conf stays.
+  tmux.run(`set-hook -g after-split-window[77] ${quote(SPLIT_HOOK)}`);
   tmux.run('display -p "#{client_name}\t#{prefix}"', (err, lines) => {
     if (err) return;
     const [name, prefix] = lines[0].split('\t');
@@ -351,6 +355,12 @@ function bridge(ws, opts) {
   // Run tmux key names through tmux's key tables, unless the binding would
   // open a prompt; that one is asked in the browser instead.
   function pressKeys(keys) {
+    const bound = keys.length === 2 ? bindings.get(keys[1]) : null;
+    const action = remoteAction(bound);
+    if (action) return onRemote(action, () => runKeys(keys));
+    runKeys(keys);
+  }
+  function runKeys(keys) {
     const wanted = keys.length === 2 ? parseBinding(bindings.get(keys[1])) : null;
     if (wanted) askBrowser(wanted);
     else {
@@ -400,6 +410,23 @@ function bridge(ws, opts) {
     const p = prompt;
     prompt = null;
     if (values === null) return;
+    // A confirmed pane command (kill-pane) in a remote tab: the machine's.
+    const action = p.command ? remoteAction(p.command) : null;
+    if (action) return onRemote(action, () => runAnswer(p, values));
+    runAnswer(p, values);
+  }
+
+  // In a remote tab, type `action`'s key into it (remote-keys.js);
+  // elsewhere, `here()`.
+  function onRemote(action, here) {
+    tmux.run(`display -p -c ${quote(clientName)} ${quote('#{@dtmux_remote}\t#{pane_id}')}`, (err, lines) => {
+      const [remote, pane] = err ? [] : String(lines[0] ?? '').split('\t');
+      if (!remote || !pane) return here();
+      tmux.run(`send-keys -t ${pane} ${actionKeys(action)}`);
+    });
+  }
+
+  function runAnswer(p, values) {
     let cmd;
     if (p.command) cmd = p.command;
     else {

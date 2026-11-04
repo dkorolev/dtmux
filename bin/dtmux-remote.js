@@ -241,7 +241,7 @@ async function ended(why) {
       const key = await askKey(`Enter: reconnect · d: delete the ${kind.noun} (and this tab)`, ['\r', '\n', 'd', 'D']);
       if (key === null) return 'close';
       if (key === '\r' || key === '\n') return 'reconnect';
-      if (await removeMachine()) return 'deleted';
+      if ((await askCode()) && (await removeMachine())) return 'deleted';
     }
   } finally {
     tmux('set-option', '-wu', '@dtmux_remote_state');
@@ -318,6 +318,44 @@ function askKey(text, keys) {
       process.stdin.pause();
       resolve(k);
     });
+  });
+}
+
+// Deleting a machine cannot be undone, so it takes typing four random
+// digits and Enter, not one key. True when they were typed; Esc, Ctrl+C, a
+// wrong code or no terminal: false.
+function askCode() {
+  const code = String(Math.floor(Math.random() * 10000)).padStart(4, '0');
+  const thing = kind.fullNoun ?? kind.noun;
+  say(`To confirm deleting this ${thing} type in the following four digits below, and press Enter (Esc keeps it).`, '31');
+  process.stdout.write(`\r\n    ${code}\r\n\r\n  > `);
+  return new Promise((resolve) => {
+    if (!process.stdin.isTTY) return resolve(false);
+    let typed = '';
+    const done = (ok) => {
+      process.stdin.off('data', on);
+      process.stdin.setRawMode(false);
+      process.stdin.pause();
+      process.stdout.write('\r\n');
+      if (!ok) say(`Not deleted.`);
+      resolve(ok);
+    };
+    function on(d) {
+      for (const k of d.toString('latin1')) {
+        if (k === '\x1b' || k === '\x03' || k === '\x04') return done(false);
+        if (k === '\r' || k === '\n') return done(typed === code);
+        if ((k === '\x7f' || k === '\b') && typed) {
+          typed = typed.slice(0, -1);
+          process.stdout.write('\b \b');
+        } else if (/[0-9]/.test(k) && typed.length < 4) {
+          typed += k;
+          process.stdout.write(k);
+        }
+      }
+    }
+    process.stdin.setRawMode(true);
+    process.stdin.resume();
+    process.stdin.on('data', on);
   });
 }
 

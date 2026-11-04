@@ -26,16 +26,21 @@
 //       attach: <remote command>     # what ssh runs there (see DEFAULT_ATTACH)
 import os from 'node:os';
 import { kindOf } from './remote-kinds.js';
+import { remoteBindings } from './remote-keys.js';
+import { shellQuote } from './agent-resume.js';
 import path from 'node:path';
 
 // What runs on the VM: its own tmux, so the shells there keep running with
 // the connection gone (a laptop asleep or rebooting, dtmux restarted) and
 // dtmux joins them again later. Always tmux: it is installed when missing.
 // Its status line is off (the page has tabs) and the mouse on (the wheel
-// scrolls its history).
+// scrolls its history). Made-up keys there split, select, zoom and close
+// its panes (remote-keys.js), so those act on the machine's panes. Set on
+// every attach, so a tab gets them when it next connects.
 export const DEFAULT_ATTACH =
   'command -v tmux >/dev/null || { echo "Installing tmux..."; sudo -n apt-get install -y -qq tmux >/dev/null; }; ' +
-  'exec tmux new-session -A -s dtmux \\; set -g status off \\; set -g mouse on';
+  'exec tmux new-session -A -s dtmux \\; set -g status off \\; set -g mouse on \\; ' +
+  remoteBindings(shellQuote);
 
 const NAME = /^[a-z][a-z0-9-]{0,30}$/;
 const isStr = (v) => typeof v === 'string' && v.trim() !== '';
@@ -129,6 +134,7 @@ export const pageRemotes = (remotes) =>
       label: r.label,
       color: r.color,
       noun: kind.noun,
+      fullNoun: kind.fullNoun ?? kind.noun,
       lifetime: kind.lifetime(r),
       paid: r.kind === 'lunanode-ctl',
       plan: r.plan ?? null,

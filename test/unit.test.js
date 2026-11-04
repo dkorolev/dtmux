@@ -7,6 +7,7 @@ import { tokenize, parseBinding, fillTemplate } from '../server/tmux-bindings.js
 import { findResumeHint } from '../server/resume-hint.js';
 import { planSwaps } from '../server/tmux-session.js';
 import { parseRemote, remoteCommand } from '../server/remotes.js';
+import { remoteAction } from '../server/remote-keys.js';
 
 test('decodeOutput turns octal escapes back into bytes and keeps raw UTF-8', () => {
   const line = Buffer.from('%output %1 a\\033[1m\\134x caf\xc3\xa9\\015\\012', 'latin1');
@@ -422,4 +423,20 @@ test("followTmuxOrder gives live tabs tmux's order and leaves dotted ones in pla
   // a, b, c are live; "saved" is a dotted tab; "new" is not in the order yet.
   assert.deepEqual(followTmuxOrder(['a', 'saved', 'b', 'c'], windows), ['b', 'saved', 'c', 'a']);
   assert.deepEqual(followTmuxOrder([], windows), []);
+});
+
+test('remoteAction: pane commands of prefix bindings', () => {
+  assert.equal(remoteAction('select-pane -L'), 'left');
+  assert.equal(remoteAction('select-pane -Z -D'), 'down');
+  assert.equal(remoteAction('select-pane -t :.+'), 'next');
+  assert.equal(remoteAction('last-pane'), 'last');
+  assert.equal(remoteAction('resize-pane -Z'), 'zoom');
+  assert.equal(remoteAction('kill-pane'), 'kill');
+  assert.equal(remoteAction('split-window -h -c "#{pane_current_path}"'), 'splitH');
+  assert.equal(remoteAction('split-window'), 'splitV');
+  assert.equal(remoteAction('resize-pane -L 5'), null);
+  assert.equal(remoteAction('confirm-before -p "kill-pane #P? (y/n)" kill-pane'), null); // asked first, then kill-pane
+  assert.equal(remoteAction('select-pane -L ; display-message hi'), null);
+  assert.equal(remoteAction('new-window'), null);
+  assert.equal(remoteAction(undefined), null);
 });

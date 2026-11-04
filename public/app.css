@@ -73,6 +73,8 @@ body {
 
 .status {
   color: #999;
+  cursor: context-menu;
+  user-select: none;
 }
 .status.ok {
   color: var(--ok);
@@ -231,17 +233,21 @@ body {
   text-align: left;
   cursor: pointer;
 }
+.tab-menu .check {
+  display: inline-block;
+  width: 1.3em;
+}
+.tab-menu hr {
+  width: 100%;
+  margin: 4px 0;
+  border: 0;
+  border-top: 1px solid var(--bar-border);
+}
 .tab-menu button:hover,
 .tab-menu button:focus-visible {
   background: var(--accent);
   color: #000;
   outline: 0;
-}
-#toolbar button.restart {
-  color: #bbb;
-}
-#toolbar button.restart:hover {
-  color: var(--fg);
 }
 
 /* tmux mode: one positioned box per pane, one layer per window. */
@@ -493,16 +499,6 @@ body {
   color: var(--fg);
 }
 
-/* The selection toggle, left of the status. */
-#toolbar button.select-mode {
-  font-size: 11px;
-  color: #888;
-  border-color: transparent;
-}
-#toolbar button.select-mode.on {
-  color: var(--accent);
-  border-color: #4ea1ff66;
-}
 
 /* A remote tab whose session ended: reconnect, delete the machine, or close. */
 .remote-ended {
@@ -546,4 +542,90 @@ body {
 .remote-ended button.danger {
   border-color: #ff6b6b88;
   color: #ff8b8b;
+}
+
+/* Deleting a remote machine: type the four digits shown, then Confirm delete. */
+.confirm-delete {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: #0009;
+}
+.confirm-delete .box {
+  width: min(420px, 100%);
+  padding: 18px 20px;
+  border-radius: 8px;
+  background: var(--bar-bg);
+  border: 1px solid #ff6b6b88;
+  box-shadow: 0 10px 30px #000c;
+  color: var(--fg);
+}
+.confirm-delete strong {
+  display: block;
+  margin-bottom: 8px;
+  overflow-wrap: anywhere;
+}
+.confirm-delete p {
+  margin: 0 0 12px;
+  line-height: 1.4;
+}
+.confirm-delete .note {
+  color: #999;
+  font-size: 12px;
+}
+.confirm-delete .digits {
+  margin: 4px 0 10px;
+  font: 600 28px/1 ui-monospace, Menlo, monospace;
+  letter-spacing: 0.35em;
+  text-align: center;
+  color: #ff8b8b;
+  user-select: none;
+}
+.confirm-delete input {
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  margin-bottom: 12px;
+  padding: 8px 10px;
+  border-radius: 5px;
+  border: 1px solid #555;
+  background: #1a1a1a;
+  color: var(--fg);
+  font: 600 22px/1 ui-monospace, Menlo, monospace;
+  letter-spacing: 0.35em;
+  text-align: center;
+  outline: 0;
+}
+.confirm-delete input:focus {
+  border-color: var(--accent);
+}
+.confirm-delete input.wrong {
+  border-color: #ff6b6b;
+}
+.confirm-delete .buttons {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.confirm-delete button {
+  font: inherit;
+  padding: 6px 14px;
+  border-radius: 5px;
+  border: 1px solid #555;
+  background: #333;
+  color: var(--fg);
+  cursor: pointer;
+}
+.confirm-delete button.danger {
+  border-color: #ff6b6b;
+  background: #a33;
+  color: #fff;
+}
+.confirm-delete button.danger:disabled {
+  opacity: 0.4;
+  cursor: default;
 }

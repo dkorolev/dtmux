@@ -24,6 +24,7 @@ export const REMOTE_FORMAT = `#{${REMOTE_OPTION}}|#{${REMOTE_ADDR_OPTION}}|#{${R
 // What the page's control client subscribes to (refresh-client -B), to hear
 // at once when the helper changes them: options change no other notification.
 export const REMOTE_SUBSCRIPTION = `dtmux-remote:@*:#{${REMOTE_ADDR_OPTION}}|#{${REMOTE_UP_OPTION}}|#{${REMOTE_STATE_OPTION}}`;
+
 const HELPER = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'bin', 'dtmux-remote.js');
 
 // "lunanode/dtmux-1a2b3c4d", or REMOTE_FORMAT's "lunanode/dtmux-1a2b3c4d|addr|up|state",

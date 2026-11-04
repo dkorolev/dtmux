@@ -215,6 +215,7 @@ const DEVBOX_NAME = /^devbox-user-\d+$/;
 
 const devbox = {
   noun: 'account',
+  fullNoun: 'devbox account', // where it must be unmistakable: deleting one
   lifetime: () => 'deleted after 24 idle hours',
   newHost: () => `new-${hex()}`,
   user: (r, host) => host,
