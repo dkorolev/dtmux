@@ -59,8 +59,8 @@ async function main() {
     tmux('set-option', '-w', '@dtmux_remote_addr', known);
     if (up) tmux('set-option', '-w', '@dtmux_remote_up', String(up));
     if ((await connect(known, false, { probe: true })) !== 'unreachable') return;
-    warn(`${known} does not answer; asking the controller about ${host}…`);
-  } else say(`${remote.label} ${kind.noun} ${host}: asking the controller (${remote.controller.join(' ')})…`);
+    warn(`${known} does not answer; asking the controller (${remote.controller.join(' ')}) ${kind.lookupWhat}…`);
+  } else say(`${remote.label} ${kind.noun} ${host}: asking the controller (${remote.controller.join(' ')}) ${kind.lookupWhat}…`);
   // The controller is reached over the network, and making a machine can take
   // minutes: a dropped connection to it is retried, picking up where things are.
   for (;;) {
@@ -82,7 +82,8 @@ async function main() {
 // Make or find the machine: { address, upSince, fresh } (fresh: just made),
 // or null when you chose to close the tab instead of making a new one.
 async function settle() {
-  const found = await kind.lookup(remote, host, say);
+  const found = await waiting(kind.lookup(remote, host, say), (secs) =>
+    say(`Still waiting for the controller to answer (${secs}s; its first ssh login can take a while)…`, '2'));
   if (found.address) return found;
   if (found.making) {
     say(`${host} is being made; waiting for it…`);
@@ -96,6 +97,18 @@ async function settle() {
   adopt(host);
   mayCreate = true;
   return make();
+}
+
+// `promise`, calling `tell(seconds)` every 10s until it settles: a slow call
+// shows that it is still going, and on what.
+async function waiting(promise, tell) {
+  const started = Date.now();
+  const timer = setInterval(() => tell(Math.round((Date.now() - started) / 1000)), 10000);
+  try {
+    return await promise;
+  } finally {
+    clearInterval(timer);
+  }
 }
 
 // Recorded in the ledger (machine-ledger.js) as soon as its name is known,

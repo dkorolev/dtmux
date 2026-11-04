@@ -159,6 +159,8 @@ async function waitOp(remote, host, id, say) {
 
 const lunanode = {
   noun: 'VM',
+  // What lookup asks the controller, for the line shown while it waits.
+  lookupWhat: 'whether the VM is there and its address',
   lifetime: (r) => `deleted ${hours(r.ttlSeconds)} after it is made`,
   newHost: (r) => `${r.hostPrefix}-${hex()}`,
   user: (r) => r.user,
@@ -216,6 +218,7 @@ const DEVBOX_NAME = /^devbox-user-\d+$/;
 const devbox = {
   noun: 'account',
   fullNoun: 'devbox account', // where it must be unmistakable: deleting one
+  lookupWhat: 'whether the account still exists',
   lifetime: () => 'deleted after 24 idle hours',
   newHost: () => `new-${hex()}`,
   user: (r, host) => host,
