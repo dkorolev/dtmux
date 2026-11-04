@@ -80,3 +80,28 @@ test('saved windows keep their branch and agent, and drop anything else', () => 
   assert.deepEqual(savedFor('agents')[0].agent, { name: 'Codex', command: 'codex resume --last' });
   assert.equal(savedFor('agents')[0].branch, 'main');
 });
+
+test('a window of several panes keeps each pane and its layout', async () => {
+  const { parsePanes, panesOf, agentsByPane } = await import('../server/window-panes.js');
+  const out = [
+    '@1\tb373,160x40,0,0{80x40,0,0,3,79x40,81,0}\t%3\t0\t/tmp',
+    '@1\tb373,160x40,0,0{80x40,0,0,3,79x40,81,0}\t%4\t1\t/usr',
+    '@2\tabcd,80x24,0,0,5\t%5\t1\t/',
+  ].join('\n');
+  const windows = parsePanes(out);
+  assert.equal(windows.get('@1').panes.length, 2);
+  const agents = agentsByPane([{ pane: '%4', window: '@1', active: true, dir: '/usr', agent: 'Codex', command: 'codex resume x' }]);
+  const kept = panesOf(windows.get('@1'), agents);
+  assert.deepEqual(kept.panes, [{ dir: '/tmp' }, { dir: '/usr', agent: { name: 'Codex', command: 'codex resume x' } }]);
+  assert.equal(kept.activePane, 1);
+  assert.deepEqual(panesOf(windows.get('@2'), agents), {}, 'one pane: nothing extra');
+  addSaved('panes', { id: 'p1', name: 'two', dir: '/usr', ...kept });
+  const [e] = savedFor('panes');
+  assert.equal(e.panes.length, 2);
+  assert.equal(e.layout, 'b373,160x40,0,0{80x40,0,0,3,79x40,81,0}');
+  assert.equal(e.activePane, 1);
+  addSaved('panes', { id: 'p2', name: 'bad', dir: '/', panes: [{ dir: '/' }, { dir: '/' }], layout: 'not a layout' });
+  assert.equal(savedFor('panes')[1].panes, undefined, 'a bad layout keeps the window as one pane');
+  addSaved('panes', { id: 'p3', name: 'remote', dir: '/', remote: { name: 'h', host: 'x' }, ...kept });
+  assert.equal(savedFor('panes')[2].panes, undefined, 'a remote tab has one pane here');
+});

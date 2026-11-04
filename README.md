@@ -157,10 +157,16 @@ remotes:
 - dtmux talks to its own tmux server (`tmux -L dtmux`), separate from any tmux
   you run by hand. It still reads your `~/.tmux.conf`. To look at its sessions
   from a shell, run `tmux -L dtmux ls`.
+- **Every pane comes back.** A window of several panes, saved by a stop or
+  a Disconnect, reopens whole: the same panes in the same layout, each in
+  its directory and on its git branch, its coding agent resumed, the same
+  pane active (`server/window-panes.js`). A remote tab needs none of this:
+  its panes live on in the machine's tmux.
 - `dtmux kill`, a plain `kill <pid>` (SIGTERM, or SIGINT), or a hard restart
   from the page first saves every tmux window of every session (name,
   directory, tab order, and a long unique id kept in the window option
-  `@dtmux_id`), then closes the browser connections, runs
+  `@dtmux_id`; for a window of several panes, every pane: its directory,
+  git branch and coding agent, and the window's layout), then closes the browser connections, runs
   `tmux -L dtmux kill-server` (the shells in its panes get SIGHUP), removes the
   pid file and exits. Hard restart (right-click the blue `dtmux` at the top
   right) does that and then starts a new

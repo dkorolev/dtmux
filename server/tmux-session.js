@@ -64,6 +64,7 @@ import { savedFor, takeSaved, addSaved, renameSaved, savedEvents, newWindowId, I
 import { REMOTE_OPTION, REMOTE_UP_OPTION, REMOTE_FORMAT, REMOTE_SUBSCRIPTION, parseRemote, remoteValue, currentRemotes, newHost, remoteCommand } from './remotes.js';
 import { pageRemotes } from './remote-config.js';
 import { SPLIT_HOOK, remoteAction, actionKeys } from './remote-keys.js';
+import { listPanes, agentsByPane, panesOf, windowAgent } from './window-panes.js';
 import { events as containerEvents, containerStatus, ensureImage } from './gh-check.js';
 import { hostStatus, cleanCheck, machineStatus, instrument, uninstrument } from './gh-remote.js';
 import { readConnectors, saveConnectors } from './settings.js';
@@ -256,29 +257,25 @@ function bridge(ws, opts) {
   const { session, commit = '', build = '', onStop = () => {}, onRestart = () => {}, onSoftRestart = () => {}, first = null, reopen = [] } = opts;
   let { cols, rows } = opts;
   const firstRemote = first?.remote ?? null;
-  const firstDir = first && (firstRemote ? os.homedir() : isDir(first.dir) ? first.dir : os.homedir());
-  const firstBranchNote = first && !firstRemote && firstDir === first.dir ? restoreBranch(firstDir, first.branch, openDirs()) : null;
+  // A saved window to start the session with: its first pane's directory
+  // now, the rest of it (panes, notes, agents) once attached.
+  const firstPlan = first && !firstRemote ? planPanes(first) : null;
   const tmux = new TmuxControl({
     session,
     cols,
     rows,
-    cwd: firstDir || os.homedir(),
+    cwd: firstPlan?.dirs[0] ?? os.homedir(),
     windowName: first && (firstRemote || !first.autoName) ? first.name : null,
     command: firstRemote ? remoteCommand(firstRemote) : null,
   });
   // Ahead of every other command, so the first window keeps its saved id.
   if (first) tmux.run(`set-option -w ${ID_OPTION} ${quote(first.id)}`);
   if (firstRemote) tmux.run(`set-option -w ${REMOTE_OPTION} ${quote(remoteValue(firstRemote))}`);
-  // The first window's notes belong to its tab (pane `p`), shown once it is there.
-  const firstNotes = [];
-  if (first && !firstRemote && firstDir !== first.dir)
-    firstNotes.push({ text: `${first.dir || 'The saved directory'} is gone; opened "${first.name}" in your home directory.`, kind: 'bad' });
-  if (firstBranchNote) firstNotes.push({ text: firstBranchNote, kind: /^Switched/.test(firstBranchNote) ? '' : 'bad' });
-  if (first?.agent || firstNotes.length)
-    tmux.run('display -p "#{pane_id}"', (err, lines) => {
+  if (firstPlan)
+    tmux.run('display -p "#{window_id} #{pane_id}"', (err, lines) => {
       if (err) return;
-      for (const n of firstNotes) send({ t: 'notice', ...n, p: lines[0] });
-      typeAgent(lines[0], first.agent);
+      const [win, pane] = String(lines[0]).split(' ');
+      fillWindow(first, firstPlan, win, pane);
     });
   const panes = new Map(); // pane id -> { ready }
   const tails = new Map(); // pane id -> recent plain text, for resume hints
@@ -745,9 +742,12 @@ function bridge(ws, opts) {
       // On a VM the agents run there, in its own tmux: they keep running.
       const agents = remote ? [] : await closeAgents(session, { target: w, log: (m) => console.log(`[${session}] ${m}`) });
       closing.delete(w);
-      const agent = agents.find((a) => a.active) ?? agents[0];
+      const byPane = agentsByPane(agents);
+      const win = remote ? null : (await listPanes(TMUX_BIN, tmuxArgs, w)).get(w);
+      const agent = (win && windowAgent(win, byPane)) ?? agents.find((a) => a.active) ?? agents[0];
       const where = agent?.dir || dir;
       addSaved(session, {
+        ...panesOf(win, byPane),
         id: uid || newWindowId(),
         name: name.join('\t'),
         autoName: auto === '1',
@@ -799,26 +799,75 @@ function bridge(ws, opts) {
   }
   function openSaved(entry) {
     if (entry.remote) return openRemote(entry.remote, entry.id, entry.name);
-    let dir = entry.dir;
-    let note = null; // about the new tab: shown on it (pane `p`)
-    if (!isDir(dir)) {
-      note = { text: `${dir || 'The saved directory'} is gone; opened "${entry.name}" in your home directory.`, kind: 'bad' };
-      dir = os.homedir();
-    } else {
-      const text = restoreBranch(dir, entry.branch, openDirs());
-      if (text) note = { text, kind: /^Switched/.test(text) ? '' : 'bad' };
-    }
+    const plan = planPanes(entry);
     const name = entry.autoName ? '' : ` -n ${quote(entry.name)}`;
     // One command list, so the id is on the window before anyone lists it.
     // runList, not run: tmux answers each command of a list separately.
     tmux.runList(
-      [`new-window -P -F "#{pane_id}" -c ${quote(dir)}${name}`, `set-option -w ${ID_OPTION} ${quote(entry.id)}`],
+      [`new-window -P -F "#{window_id} #{pane_id}" -c ${quote(plan.dirs[0])}${name}`, `set-option -w ${ID_OPTION} ${quote(entry.id)}`],
       ([made]) => {
         if (made.err) return send({ t: 'notice', text: `Could not reopen "${entry.name}": ${made.err.message}`, kind: 'bad' });
-        if (note) send({ t: 'notice', ...note, p: made.lines[0] });
-        typeAgent(made.lines[0], entry.agent);
+        const [win, first] = String(made.lines[0]).split(' ');
+        fillWindow(entry, plan, win, first);
       },
     );
+  }
+
+  // A saved window's panes (one for most windows): each one's directory
+  // (home when it is gone), its git branch put back, and what to tell.
+  function planPanes(entry) {
+    const saved = entry.panes?.length > 1 ? entry.panes : [{ dir: entry.dir, branch: entry.branch, agent: entry.agent }];
+    const notes = []; // [pane index, { text, kind }]: shown on that pane
+    const branchesDone = new Set();
+    const dirs = saved.map((p, i) => {
+      if (!isDir(p.dir)) {
+        notes.push([i, { text: `${p.dir || 'The saved directory'} is gone; opened "${entry.name}"${saved.length > 1 ? ` (pane ${i + 1})` : ''} in your home directory.`, kind: 'bad' }]);
+        return os.homedir();
+      }
+      if (!branchesDone.has(p.dir)) {
+        branchesDone.add(p.dir);
+        const text = restoreBranch(p.dir, p.branch, openDirs());
+        if (text) notes.push([i, { text, kind: /^Switched/.test(text) ? '' : 'bad' }]);
+      }
+      return p.dir;
+    });
+    return { saved, dirs, notes };
+  }
+
+  // Window `win`, made with its first pane `first` in plan.dirs[0]: make the
+  // other panes, put the layout back, then tell the notes and resume each
+  // pane's agent.
+  function fillWindow(entry, { saved, dirs, notes }, win, first) {
+    const ids = [first];
+    const finish = () => {
+      const cmds = [];
+      if (ids.length === dirs.length && ids.length > 1 && entry.layout) cmds.push(`select-layout -t ${win} ${quote(entry.layout)}`);
+      if (ids.length > 1) cmds.push(`select-pane -t ${ids[entry.activePane] ?? first}`);
+      const after = () => {
+        for (const [i, note] of notes) if (ids[i]) send({ t: 'notice', ...note, p: ids[i] });
+        saved.forEach((p, i) => ids[i] && typeAgent(ids[i], p.agent));
+      };
+      if (cmds.length) tmux.runList(cmds, after);
+      else after();
+    };
+    // One split at a time, after the last pane made, so tmux lists the panes
+    // in their saved order (the order the layout gives them out); evened out
+    // each time, so many panes still fit.
+    const next = () => {
+      if (ids.length >= dirs.length) return finish();
+      tmux.runList(
+        [`split-window -d -P -F "#{pane_id}" -t ${ids[ids.length - 1]} -c ${quote(dirs[ids.length])}`, `select-layout -t ${win} tiled`],
+        ([split]) => {
+          if (split.err) {
+            send({ t: 'notice', text: `"${entry.name}" came back with ${ids.length} of its ${dirs.length} panes: ${split.err.message}`, kind: 'bad', p: first });
+            return finish();
+          }
+          ids.push(String(split.lines[0]).trim());
+          next();
+        },
+      );
+    };
+    next();
   }
 
   // A tab on a VM: `create` makes the VM (a new tab), else it is joined.

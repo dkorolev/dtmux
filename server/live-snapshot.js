@@ -19,6 +19,7 @@ import { sessionPanes } from './pane-info.js';
 import { resumeCommand } from './agent-resume.js';
 import { branchOf } from './git-branch.js';
 import { REMOTE_FORMAT, parseRemote } from './remotes.js';
+import { listPanes, panesOf, windowAgent } from './window-panes.js';
 
 export const SNAPSHOT_FILE = path.join(STATE_DIR, 'live-windows.json');
 
@@ -34,15 +35,17 @@ export const LIVE_FORMAT = [
 ].join('\t');
 
 // `list-windows -a -F LIVE_FORMAT` output -> saveOnStop items. `agents`:
-// window id -> { dir, agent, command }, the agent to resume there.
-export function parseLive(out, agents = new Map()) {
+// pane id -> { window, active, dir, agent, command }, the agent to resume
+// there; `windows`: listPanes' map (window-panes.js), for every pane.
+export function parseLive(out, agents = new Map(), windows = new Map()) {
   return out
     .split('\n')
     .filter(Boolean)
     .map((line) => {
       const [session, index, id, auto, windowId, paneDir, remote, ...name] = line.split('\t');
-      const agent = agents.get(windowId);
       const where = parseRemote(remote);
+      const win = windows.get(windowId) ?? { panes: [...agents.values()].filter((a) => a.window === windowId).map((a) => ({ id: a.pane, active: a.active })) };
+      const agent = windowAgent(win, agents);
       const dir = agent?.dir || paneDir;
       return {
         session,
@@ -54,6 +57,7 @@ export function parseLive(out, agents = new Map()) {
         agent: agent?.command ? { name: agent.agent, command: agent.command } : null,
         remote: where,
         name: name.join('\t'),
+        ...(where ? {} : panesOf(windows.get(windowId), agents)),
       };
     });
 }
@@ -61,7 +65,7 @@ export function parseLive(out, agents = new Map()) {
 const run = (...args) =>
   new Promise((resolve) => execFile(TMUX_BIN, tmuxArgs(...args), { timeout: 5000 }, (err, out) => resolve(err ? null : out)));
 
-// The agents running now, from `ps`, per window: the active pane's wins.
+// The agents running now, from `ps`, per pane.
 async function runningAgents(sessions) {
   const agents = new Map();
   for (const s of sessions) {
@@ -69,7 +73,7 @@ async function runningAgents(sessions) {
     for (const p of panes) {
       if (!p.running?.agent) continue;
       const command = resumeCommand(p.running.agent, p.running.args, null);
-      if (command && (!agents.has(p.window) || p.active)) agents.set(p.window, { dir: p.path, agent: p.running.agent, command });
+      if (command) agents.set(p.id, { pane: p.id, window: p.window, active: p.active, dir: p.path, agent: p.running.agent, command });
     }
   }
   return agents;
@@ -83,7 +87,7 @@ export async function writeSnapshot() {
   if (!pid || !sessions) return null;
   const out = await run('list-windows', '-a', '-F', LIVE_FORMAT);
   if (out === null) return null;
-  const live = parseLive(out, await runningAgents(sessions));
+  const live = parseLive(out, await runningAgents(sessions), await listPanes(TMUX_BIN, tmuxArgs));
   fs.mkdirSync(STATE_DIR, { recursive: true });
   const tmp = `${SNAPSHOT_FILE}.${process.pid}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify({ version: 1, at: new Date().toISOString(), tmuxPid: pid, live }, null, 2) + '\n');

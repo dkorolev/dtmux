@@ -23,6 +23,7 @@ import { exportKitty, importKitty } from './kitty-tracker.js';
 import { saveOnStop } from './saved-windows.js';
 import { closeAgents } from './agent-close.js';
 import { LIVE_FORMAT, parseLive, writeSnapshot, readSnapshot, dropSnapshot } from './live-snapshot.js';
+import { listPanes, agentsByPane } from './window-panes.js';
 import { sweepMachines, SWEEP_MS } from './machine-sweep.js';
 
 const port = Number(process.argv[2]);
@@ -182,11 +183,10 @@ async function saveWindows(done) {
       resolve(err ? [] : out.split('\n').filter(Boolean)),
     ),
   );
-  const agents = new Map(); // window id -> the agent to resume there
-  for (const found of await Promise.all(sessions.map((s) => closeAgents(s, { log }).catch(() => [])))) {
-    for (const a of found) if (a.command && (!agents.has(a.window) || a.active)) agents.set(a.window, a);
-  }
+  const found = (await Promise.all(sessions.map((s) => closeAgents(s, { log }).catch(() => [])))).flat();
+  const agents = agentsByPane(found); // pane id -> the agent to resume there
   if (agents.size) log(`closed ${agents.size} coding agent(s) to resume later`);
+  const windows = await listPanes(TMUX_BIN, tmuxArgs);
   execFile(TMUX_BIN, tmuxArgs('list-windows', '-a', '-F', LIVE_FORMAT), (err, out, stderr) => {
     let live = [];
     if (err) {
@@ -198,7 +198,7 @@ async function saveWindows(done) {
         live = snap.live;
         log(`tmux is gone; saving the ${live.length} window(s) open at ${snap.at}`);
       }
-    } else live = parseLive(out, agents);
+    } else live = parseLive(out, agents, windows);
     try {
       log(`saved ${saveOnStop(live)} window(s) for later (${live.length} were open)`);
       dropSnapshot();

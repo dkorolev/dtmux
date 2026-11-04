@@ -12,6 +12,8 @@
 // `branch`: the git branch `dir` was on. `agent`: { name, command }, the coding
 // agent that ran there and the command that resumes it (see agent-close.js).
 // `remote`: { name, host, address?, upSince? }, for a tab on a remote VM (see remotes.js).
+// `panes`, `layout`, `activePane`: a window of more than one pane, pane by
+// pane (see window-panes.js); `dir` and `agent` are then its active pane's.
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -30,7 +32,10 @@ const isEntry = (e) =>
   e && typeof e.id === 'string' && e.id && typeof e.name === 'string' && typeof e.dir === 'string';
 
 // The fields kept for a saved window; anything else is dropped.
-function clean({ id, name, autoName, dir, branch, agent, remote }) {
+const cleanAgent = (agent) =>
+  agent && typeof agent.name === 'string' && typeof agent.command === 'string' && agent.command ? { name: agent.name, command: agent.command } : null;
+
+function clean({ id, name, autoName, dir, branch, agent, remote, panes, layout, activePane }) {
   const e = { id, name, autoName: Boolean(autoName), dir };
   if (remote && typeof remote.name === 'string' && typeof remote.host === 'string' && remote.name && remote.host) {
     e.remote = { name: remote.name, host: remote.host };
@@ -38,8 +43,20 @@ function clean({ id, name, autoName, dir, branch, agent, remote }) {
     if (Number.isInteger(remote.upSince)) e.remote.upSince = remote.upSince;
   }
   if (typeof branch === 'string' && branch) e.branch = branch;
-  if (agent && typeof agent.name === 'string' && typeof agent.command === 'string' && agent.command)
-    e.agent = { name: agent.name, command: agent.command };
+  if (cleanAgent(agent)) e.agent = cleanAgent(agent);
+  if (!e.remote && Array.isArray(panes) && panes.length > 1 && panes.length <= 64 && typeof layout === 'string' && /^[0-9a-f]{4},[0-9x,{}[\]]+$/.test(layout)) {
+    const kept = panes.filter((p) => p && typeof p.dir === 'string');
+    if (kept.length === panes.length) {
+      e.panes = kept.map((p) => {
+        const out = { dir: p.dir };
+        if (typeof p.branch === 'string' && p.branch) out.branch = p.branch;
+        if (cleanAgent(p.agent)) out.agent = cleanAgent(p.agent);
+        return out;
+      });
+      e.layout = layout;
+      e.activePane = Number.isInteger(activePane) && activePane >= 0 && activePane < panes.length ? activePane : 0;
+    }
+  }
   return e;
 }
 
