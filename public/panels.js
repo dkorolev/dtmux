@@ -141,8 +141,13 @@ export function makePanels({ send, focus }) {
       { button: 'Close', run: closeGh },
     ]);
 
-    // Draw it: ┌─ title ─┐, │ rows │, └──┘. Buttons are real buttons.
-    const focused = document.activeElement?.dataset?.label;
+    // Draw it: ┌─ title ─┐, │ rows │, └──┘. Buttons are real buttons, the
+    // same elements from one drawing to the next (a click that starts on one
+    // must end on it), and nothing is redrawn while nothing changed.
+    const key = JSON.stringify(rows.map((row) => row.map((p) => (typeof p === 'string' ? p : [p.button, Boolean(p.disabled)]))));
+    if (key === gh.drawn) return;
+    gh.drawn = key;
+    gh.buttons ??= new Map();
     gh.el.replaceChildren();
     const line = (...parts) => {
       const l = el('div', 'gh-line');
@@ -159,10 +164,14 @@ export function makePanels({ send, focus }) {
           parts.push(p);
           len += p.length;
         } else {
-          const b = el('button', 'gh-button', `[ ${p.button} ]`);
-          b.dataset.label = p.button;
+          let b = gh.buttons.get(p.button);
+          if (!b) {
+            b = el('button', 'gh-button', `[ ${p.button} ]`);
+            b.addEventListener('click', () => b.run?.());
+            gh.buttons.set(p.button, b);
+          }
+          b.run = p.run;
           b.disabled = Boolean(p.disabled);
-          b.addEventListener('click', p.run);
           parts.push(b);
           len += p.button.length + 4;
         }
@@ -170,7 +179,6 @@ export function makePanels({ send, focus }) {
       line('│ ', ...parts, ' '.repeat(Math.max(0, W - len)), ' │');
     }
     line(`└${'─'.repeat(W + 2)}┘`);
-    if (focused) gh.el.querySelector(`button[data-label="${CSS.escape(focused)}"]`)?.focus();
   }
 
   function act(action) {
