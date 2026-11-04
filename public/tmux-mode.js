@@ -715,6 +715,7 @@ export function startTmuxMode({ container, toolbar, params }) {
   // slides into view, with a bit of its neighbour showing. Only when the
   // active tab changes, so scrolling the tab bar by hand is left alone.
   let shownActive = null;
+  let shownKinds = null; // key -> kind at the last render
   function revealTab(el) {
     const bar = toolbar.tabs;
     if (!el || bar.scrollWidth <= bar.clientWidth) return;
@@ -770,11 +771,15 @@ export function startTmuxMode({ container, toolbar, params }) {
       if (want !== el) toolbar.tabs.insertBefore(el, want);
       prev = el;
     }
+    // A new tab (made here or elsewhere, a machine still being made, a
+    // dotted one tapped) is shown too; the active one wins.
     const active = tabs.find((t) => t.kind === 'live' && t.w.active)?.key ?? null;
+    const fresh = shownKinds && tabs.findLast((t) => t.kind !== 'saved' && ![t.kind, 'live'].includes(shownKinds.get(t.key)))?.key;
+    shownKinds = new Map(tabs.map((t) => [t.key, t.kind]));
     if (active !== shownActive) {
       shownActive = active;
       if (active) revealTab(tabEls.get(active));
-    }
+    } else if (fresh) revealTab(tabEls.get(fresh));
     // A reopened window joins tmux's list last; move it to its tab's place.
     if (landed) syncTmuxOrder();
   }
