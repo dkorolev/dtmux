@@ -177,7 +177,9 @@ The toggle left of `dtmux` switches how a drag in a terminal works.
 clicks and drags. **Plain**: the page selects the text itself, instantly, for
 Cmd+C, whatever the program wants; the wheel still goes to the program. In
 plain mode Ctrl+C copies too while text is selected (and interrupts, as ever,
-when nothing is). Plain
+when nothing is). Links open with a click in plain mode, and with
+Cmd+click in either mode (in smart mode a program that wants the mouse gets
+plain clicks). Plain
 is the one for remote tabs, where the VM's tmux would otherwise do the
 selecting, a round trip away. Option+drag selects text in either mode.
 

@@ -1301,23 +1301,31 @@ export function startTmuxMode({ container, toolbar, params }) {
   // The press, the movement and the release of a drag all go with Option,
   // or the program still gets the motion (and the selection is cut short).
   // Plain hover motion over a terminal too: programs get no mouse at all.
+  // In smart mode, a click with Cmd is taken the same way, so Cmd+click opens
+  // a link even under a program that wants the mouse (as in iTerm).
   let plainDrag = false;
   const overTerminal = (e) => e.target instanceof Element && e.target.closest('.tmux-pane .xterm-screen');
   const forceSelect = (e) => {
-    if (!plainSelect || !e.isTrusted || e.altKey) return;
+    if (!e.isTrusted || e.altKey) return;
     if (e.type === 'mousedown') {
-      if (e.button !== 0 || !overTerminal(e)) return;
+      if (e.button !== 0 || !overTerminal(e) || !(plainSelect || e.metaKey)) return;
       plainDrag = true;
-    } else if (!plainDrag && !overTerminal(e)) return;
+    } else if (!plainDrag && !(plainSelect && overTerminal(e))) return;
     if (e.type === 'mouseup') plainDrag = false;
     e.stopImmediatePropagation();
     e.preventDefault();
     // The press goes to the terminal (with Option, so xterm.js selects). The
-    // movement and release go to the document only: the selection follows
-    // them there, while the terminal element, which reports them to the
-    // program, never sees them.
-    const to = e.type === 'mousedown' ? e.target : document;
-    to.dispatchEvent(new MouseEvent(e.type, { ...pick(e), altKey: true, bubbles: true, cancelable: true }));
+    // movement and release go to the document, where the selection follows
+    // them, and to the screen layer without bubbling, where links are found
+    // (hover) and opened (a click). The terminal element, which reports the
+    // mouse to the program, never sees them.
+    const init = { ...pick(e), altKey: true, cancelable: true };
+    if (e.type === 'mousedown') e.target.dispatchEvent(new MouseEvent(e.type, { ...init, bubbles: true }));
+    else {
+      const screen = e.target instanceof Element ? e.target.closest('.tmux-pane .xterm-screen') : null;
+      screen?.dispatchEvent(new MouseEvent(e.type, { ...init, bubbles: false }));
+      document.dispatchEvent(new MouseEvent(e.type, { ...init, bubbles: true }));
+    }
     // Taking over the press keeps the terminal from taking the focus; give
     // it, so Cmd+C reaches the terminal that has the selection.
     if (e.type === 'mousedown') {
