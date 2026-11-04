@@ -30,6 +30,14 @@ keys and YAML syntax errors all stop `dtmux` with every problem listed (exit
 code 2). If you change the port while dtmux runs, `dtmux` tells you so;
 `dtmux kill && dtmux` moves it.
 
+**Settings** (right-click the blue `dtmux` › Settings…) edits the
+connectors, the `remotes:` below, field by field: colors (with a picker),
+labels and the rest, an empty field meaning the default. Save checks the
+whole file first and refuses an invalid one, saying why; it writes the
+file in place, comments kept (aligned trailing comments lose their
+alignment). Tabs take a new color or label at once. Settings also shows the
+gh check container (see below), with Rebuild.
+
 ## Remote sessions
 
 A tab can live on a remote machine instead of this one. Right-click (or
@@ -102,6 +110,23 @@ remotes:
   page sends Shift+Enter in a remote tab as the enhanced key (`ESC [13;2u`),
   and the machine's tmux is set to pass such keys on (`extended-keys
   always`, with the `extkeys` terminal feature set before attaching).
+- **gh on the machine.** Right-click a remote tab › **gh…** opens a small
+  panel drawn in text: who `gh` is logged in as on this Mac, whether that
+  token passes a check in a clean container, and who `gh` is on the
+  machine. **Instrument gh** logs the machine's `gh` in with this Mac's
+  token (and makes git use it for github.com); **Un-instrument gh** logs it
+  out again and takes it out of git. The token goes over ssh's stdin, never
+  in a command line; on the machine `gh` keeps it in
+  `~/.config/gh/hosts.yml` (mode 600). A machine without a `gh` that runs
+  (a devbox's snap `gh` does not, for homes outside `/home`) gets one in
+  `~/.local/bin`; shells started before that need `hash -r` or a new shell.
+  The clean check runs `gh` in a tiny container (`dtmux-gh-check`: Alpine
+  with `github-cli`) under the first runtime that works: Apple
+  `container`, then podman, then docker. It is built on first use, and
+  shown building (in the panel, and in Settings with its log); Settings ›
+  Rebuild builds it again from scratch for a newer `gh`.
+- **Rename** is on every tab's menu, live or dotted: the label turns into a
+  text field, Enter keeps the name, Esc does not.
 - **Delete, not close.** A remote tab has no Close: right-click it for
   **Delete the VM / account…** (live or dotted), which deletes the machine,
   and the tab goes with it. It works on a stuck tab too. Every delete asks
@@ -284,7 +309,7 @@ in-memory daemon state that is not in tmux, on disk, or in the hand-over.
 
 Environment overrides, mostly for testing: `DTMUX_CONFIG`, `DTMUX_STATE_DIR`,
 `DTMUX_TMUX_SOCKET`, `DTMUX_SESSION` (default session name, `dtmux`),
-`TMUX_BIN`.
+`DTMUX_TMUX_BIN`.
 
 ## Layout
 
@@ -300,6 +325,11 @@ Environment overrides, mostly for testing: `DTMUX_CONFIG`, `DTMUX_STATE_DIR`,
 | `server/kitty-tracker.js`  | remembers kitty keyboard flags per pane for reattach |
 | `server/tmux-bindings.js`  | spots bindings that open tmux prompts, fills them in |
 | `server/pty-session.js`    | plain-shell mode                                     |
+| `server/remote-ssh.js`     | ssh into a remote tab's machine (helper and daemon)  |
+| `server/remote-keys.js`    | pane commands of a remote tab act on the machine     |
+| `server/gh-check.js`       | the clean container that checks a GitHub token       |
+| `server/gh-remote.js`      | gh on a remote machine: status, instrument, undo     |
+| `server/settings.js`       | Settings: connectors read and saved, comments kept   |
 | `public/`                  | the browser client                                   |
 
 `npm test` runs the unit tests.

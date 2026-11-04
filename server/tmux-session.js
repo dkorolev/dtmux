@@ -60,10 +60,13 @@ import { findResumeHint } from './resume-hint.js';
 import { windowInfo } from './pane-info.js';
 import { closeAgents } from './agent-close.js';
 import { branchOf, restoreBranch } from './git-branch.js';
-import { savedFor, takeSaved, addSaved, savedEvents, newWindowId, ID_OPTION } from './saved-windows.js';
+import { savedFor, takeSaved, addSaved, renameSaved, savedEvents, newWindowId, ID_OPTION } from './saved-windows.js';
 import { REMOTE_OPTION, REMOTE_UP_OPTION, REMOTE_FORMAT, REMOTE_SUBSCRIPTION, parseRemote, remoteValue, currentRemotes, newHost, remoteCommand } from './remotes.js';
 import { pageRemotes } from './remote-config.js';
 import { SPLIT_HOOK, remoteAction, actionKeys } from './remote-keys.js';
+import { events as containerEvents, containerStatus, ensureImage } from './gh-check.js';
+import { hostStatus, cleanCheck, machineStatus, instrument, uninstrument } from './gh-remote.js';
+import { readConnectors, saveConnectors } from './settings.js';
 import { kindOf } from './remote-kinds.js';
 import { dropMachine } from './machine-ledger.js';
 
@@ -341,6 +344,8 @@ function bridge(ws, opts) {
     send({ t: 'saved', windows: savedFor(session).map(pageEntry) });
   const onSavedChange = (s) => s === session && sendSaved();
   savedEvents.on('change', onSavedChange);
+  const onContainer = (status) => send({ t: 'container', status });
+  containerEvents.on('change', onContainer);
   loadBindings();
   refresh();
   for (const entry of reopen) openSaved(entry);
@@ -560,6 +565,7 @@ function bridge(ws, opts) {
     ws.off('message', onMessage);
     ws.off('close', detach);
     savedEvents.off('change', onSavedChange);
+    containerEvents.off('change', onContainer);
     clearTimeout(refreshTimer);
     tmux.close();
   }
@@ -653,7 +659,73 @@ function bridge(ws, opts) {
       case 'soft-restart':
         onSoftRestart();
         break;
+      case 'rename':
+        if (typeof msg.name === 'string' && msg.name.trim() && msg.name.length <= 200) {
+          const name = msg.name.replace(/[\r\n\t]+/g, ' ').trim();
+          if (isWindowId(msg.w)) tmux.run(`rename-window -t ${msg.w} ${quote(name)}`);
+          else if (typeof msg.id === 'string') renameSaved(session, msg.id, name);
+        }
+        break;
+      case 'gh-status':
+      case 'gh-instrument':
+      case 'gh-uninstrument':
+        if (isWindowId(msg.w)) ghRequest(msg.t, msg.w);
+        break;
+      case 'settings-get':
+        sendSettings();
+        if (containerStatus().state === 'unknown') ensureImage({ build: false });
+        break;
+      case 'settings-save': {
+        const r = saveConnectors(msg.remotes);
+        send({ t: 'settings-saved', ok: r.ok, problems: r.problems });
+        if (r.ok) {
+          send({ t: 'remotes', remotes: remotesForPage() });
+          sendSettings();
+        }
+        break;
+      }
+      case 'container-rebuild':
+        ensureImage({ rebuild: true });
+        break;
     }
+  }
+
+  function sendSettings() {
+    let connectors;
+    try {
+      connectors = readConnectors();
+    } catch (e) {
+      connectors = { error: e.message };
+    }
+    send({ t: 'settings', connectors, container: containerStatus() });
+  }
+
+  // gh on a remote tab's machine (gh-remote.js). Each part of the answer is
+  // sent as soon as it is known: { t: 'gh', w, part, ... }.
+  function ghRequest(what, w) {
+    tmux.run(`display -p -t ${w} ${quote(`#{window_id}\t${REMOTE_FORMAT}`)}`, async (err, lines) => {
+      const reply = (part, data) => send({ t: 'gh', w, part, ...data });
+      const [id, remoteVal] = err ? [] : String(lines[0] ?? '').split('\t');
+      const where = id === w ? parseRemote(remoteVal) : null;
+      let remote = null;
+      try {
+        remote = where && currentRemotes()[where.name];
+      } catch {}
+      if (!where || !remote) return reply('error', { error: 'This tab is not on a remote machine dtmux knows.' });
+      const address = where.address ?? remote.address;
+      if (!address) return reply('error', { error: `${where.host} has no address yet (still being made?).` });
+      const target = [remote, where.host, address];
+      if (what === 'gh-status') {
+        hostStatus().then((r) => reply('host', r));
+        cleanCheck().then((r) => reply('check', r));
+        machineStatus(...target).then((r) => reply('machine', r));
+      } else {
+        reply('busy', { action: what });
+        const r = await (what === 'gh-instrument' ? instrument(...target) : uninstrument(...target));
+        reply('done', { action: what, ...r });
+        machineStatus(...target).then((m) => reply('machine', m));
+      }
+    });
   }
 
   // Save a window the way a stop would (name, directory, long id), then

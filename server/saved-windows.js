@@ -89,6 +89,17 @@ export function takeSaved(session, id) {
 
 // Save one live window for later, as a page's Disconnect does: it becomes a
 // dotted tab, the same as if dtmux had stopped. Replaces an entry with its id.
+// Rename a dotted tab; false when there is no such one.
+export function renameSaved(session, id, name) {
+  const entry = (saved.get(session) ?? []).find((e) => e.id === id);
+  if (!entry) return false;
+  entry.name = name;
+  entry.autoName = false;
+  persist();
+  savedEvents.emit('change', session);
+  return true;
+}
+
 export function addSaved(session, entry) {
   const list = (saved.get(session) ?? []).filter((e) => e.id !== entry.id);
   list.push(clean(entry));

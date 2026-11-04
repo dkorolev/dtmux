@@ -21,14 +21,13 @@ import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { loadConfig } from '../server/config.js';
 import { STATE_DIR } from '../server/paths.js';
-import { shellQuote } from '../server/agent-resume.js';
-import { kindOf, mux, MUX_DIR, transient } from '../server/remote-kinds.js';
+import { kindOf, MUX_DIR, transient } from '../server/remote-kinds.js';
 import { recordMachine, dropMachine } from '../server/machine-ledger.js';
 import { TMUX_BIN } from '../server/tmux-control.js';
+import { sshArgs, KNOWN_HOSTS } from '../server/remote-ssh.js';
 
 const [name, firstHost, ...flags] = process.argv.slice(2);
 const flag = (f) => (flags.includes(f) ? flags[flags.indexOf(f) + 1] ?? null : null);
-const KNOWN_HOSTS = path.join(STATE_DIR, 'known_hosts');
 const KEEPALIVE_MS = 30 * 60000;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const say = (text, color = '36') => process.stdout.write(`\x1b[${color}m▸ ${text}\x1b[0m\r\n`);
@@ -143,21 +142,7 @@ async function connect(address, fresh, { probe = false } = {}) {
   // VM addresses are reused: a new VM at an old address has a new host key.
   if (fresh) spawnSync('ssh-keygen', ['-R', address, '-f', KNOWN_HOSTS], { stdio: 'ignore' });
   const user = kind.user(remote, host);
-  const base = [
-    '-o', 'StrictHostKeyChecking=accept-new',
-    '-o', `UserKnownHostsFile=${KNOWN_HOSTS}`,
-    '-o', 'ServerAliveInterval=5',
-    '-o', 'ServerAliveCountMax=3',
-    '-o', 'ConnectTimeout=15',
-    ...mux('8h'),
-    ...(remote.identity ? ['-o', 'IdentitiesOnly=yes', '-i', remote.identity] : []),
-    // Through the jump host's own shared connection (the controller's, often
-    // already open), which -J would not reuse. %%C: the inner ssh's token.
-    ...(remote.jump
-      ? ['-o', `ProxyCommand=ssh ${mux('30m').join(' ').replace('%C', '%%C')} -W '[%h]:%p' ${shellQuote(remote.jump)}`]
-      : []),
-    `${user}@${address}`,
-  ];
+  const base = sshArgs(remote, host, address);
   // An account deleted when idle stays alive while its tab is connected.
   const touch = () => spawn('ssh', [...base, 'touch .dtmux-alive'], { stdio: 'ignore' }).on('error', () => {});
   const keepAlive = kind.keepAlive ? setInterval(touch, KEEPALIVE_MS) : null;

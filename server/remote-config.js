@@ -85,6 +85,25 @@ const KIND_FIELDS = {
 };
 const fieldsOf = (kind) => ({ ...COMMON, ...(KIND_FIELDS[kind] ?? {}) });
 
+// For the Settings page: per kind, its fields in order with
+// { field, type, required, default }. type: 'kind' | 'color' | 'words' |
+// 'bool' | 'int' | 'text'.
+export function fieldSpecs() {
+  const typeOf = (field, def) =>
+    field === 'kind' ? 'kind' : field === 'color' ? 'color' : field === 'controller' ? 'words' : typeof def === 'boolean' ? 'bool' : Number.isInteger(def) ? 'int' : 'text';
+  return Object.fromEntries(
+    Object.keys(KIND_FIELDS).map((kind) => [
+      kind,
+      Object.entries(fieldsOf(kind)).map(([field, [, def]]) => ({
+        field,
+        type: typeOf(field, def),
+        required: def === undefined,
+        default: def === undefined || field === 'attach' ? null : def,
+      })),
+    ]),
+  );
+}
+
 const show = (v) => (typeof v === 'string' ? JSON.stringify(v) : JSON.stringify(v) ?? String(v));
 const isMap = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 

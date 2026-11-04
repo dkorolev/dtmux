@@ -8,6 +8,7 @@
 // tmux prefix key is the exception: prefix sequences go through tmux's own
 // key bindings, so splits, new windows and the rest keep working.
 import { createTerminal, leaveQueriesToTmux, base64ToBytes, socketUrl } from './terminal-common.js';
+import { makePanels } from './panels.js';
 import { followTmuxOrder, orderTabs, parseLayout, paneBorders, tmuxKeyName, windowSwitchDirection } from './tmux-util.js';
 
 export function startTmuxMode({ container, toolbar, params }) {
@@ -51,6 +52,7 @@ export function startTmuxMode({ container, toolbar, params }) {
   const RETRY_MS = 333;
   let retry = null;
 
+  const panels = makePanels({ send: (msg) => send(msg), focus: () => panes.get(activePane)?.term.focus() });
   const send = (msg) => {
     if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
   };
@@ -129,11 +131,16 @@ export function startTmuxMode({ container, toolbar, params }) {
         case 'taken':
           showTaken();
           break;
+        case 'remotes':
+          setRemotes(msg.remotes);
+          break;
         case 'exit':
           ended = true;
           if (msg.sessionGone) showEnded('session ended', `Session "${sessionName}" ended.`, 'Start a new session');
           else showEnded('detached', `Detached from session "${sessionName}" (${msg.reason}).`, 'Reattach');
           break;
+        default:
+          panels.onMessage(msg);
       }
     };
   }
@@ -747,7 +754,7 @@ export function startTmuxMode({ container, toolbar, params }) {
         tabEls.set(t.key, el);
       }
       const label = t.w.name;
-      if (el.textContent !== label) el.textContent = label;
+      if (el.textContent !== label && renamingKey !== t.key) el.textContent = label;
       if (t.kind !== 'live') closingTabs.delete(t.key); // closed: done
       el.className =
         (t.kind === 'live'
@@ -970,6 +977,44 @@ export function startTmuxMode({ container, toolbar, params }) {
     window.addEventListener('blur', done);
   }
 
+  // Rename a tab in place: its label turns into a text field; Enter keeps
+  // the name, Esc or an empty name keeps the old one.
+  let renamingKey = null;
+  function renameTab(key) {
+    const t = tabItems.get(key);
+    const b = tabEls.get(key);
+    if (!t || !b) return;
+    renamingKey = key;
+    const input = document.createElement('input');
+    input.className = 'tab-rename';
+    input.value = t.w.name;
+    input.spellcheck = false;
+    input.size = Math.max(8, t.w.name.length + 2);
+    b.replaceChildren(input);
+    let done = false;
+    const finish = (keep) => {
+      if (done) return;
+      done = true;
+      const name = input.value.replace(/\s+/g, ' ').trim();
+      renamingKey = null;
+      b.textContent = keep && name ? name : t.w.name;
+      if (keep && name && name !== t.w.name) send(t.kind === 'live' ? { t: 'rename', w: t.w.id, name } : { t: 'rename', id: key, name });
+      panes.get(activePane)?.term.focus();
+    };
+    for (const ev of ['pointerdown', 'click', 'dblclick']) input.addEventListener(ev, (e) => e.stopPropagation());
+    input.addEventListener('keydown', (e) => {
+      e.stopPropagation();
+      if (e.key === 'Enter') finish(true);
+      else if (e.key === 'Escape') finish(false);
+    });
+    input.addEventListener('input', () => (input.size = Math.max(8, input.value.length + 2)));
+    input.addEventListener('blur', () => finish(true));
+    setTimeout(() => {
+      input.focus();
+      input.select();
+    });
+  }
+
   // Right-click on a tab. Live: Disconnect saves the window and closes it, so
   // it turns dotted in place and a tap starts it again. Dotted: Reopen, or
   // Forget it for good.
@@ -978,9 +1023,16 @@ export function startTmuxMode({ container, toolbar, params }) {
     closeTabMenu();
     const t = tabItems.get(key);
     if (!t || !haveState || t.kind === 'pending') return;
+    const rename = ['Rename…', 'Give this tab a name of your own', () => renameTab(key)];
+    const ghItem = t.w.remote
+      ? [['gh…', `GitHub CLI on ${t.w.remote.host}: who it is logged in as; log it in with this Mac's token, or out`, () => panels.showGh({ ...t, remoteInfo: remoteOf(t.w) })]]
+      : [];
     showMenu(
       t.kind === 'live'
         ? [
+            rename,
+            ...ghItem,
+            null,
             [
               'Disconnect',
               t.w.remote
@@ -1005,6 +1057,8 @@ export function startTmuxMode({ container, toolbar, params }) {
                 ],
           ]
         : [
+            rename,
+            null,
             [
               'Reopen',
               t.w.remote ? `Join ${t.w.remote.host} again` : `Start it again in ${t.w.dir}`,
@@ -1422,7 +1476,8 @@ export function startTmuxMode({ container, toolbar, params }) {
   const statusEl = document.getElementById('status');
   function showStatusMenu() {
     const r = statusEl.getBoundingClientRect();
-    showMenu([...selectItems(), ...(canRestart ? [null, ...restartItems()] : [])], r.right, r.bottom + 4);
+    const settingsItem = ['Settings…', 'The gh check container, and the connectors (remotes) with their colors', () => panels.showSettings()];
+    showMenu([...selectItems(), null, settingsItem, ...(canRestart ? [null, ...restartItems()] : [])], r.right, r.bottom + 4);
   }
   onMenuGesture(statusEl, showStatusMenu);
   // The press, the movement and the release of a drag all go with Option,
