@@ -97,6 +97,11 @@ remotes:
   `attach` command, so a tab gets them when it next connects); a split
   made here is undone at once by a hook (`after-split-window[77]`). See
   `server/remote-keys.js`.
+- **Shift+Enter works there** (a new line in Claude Code). The machine's
+  tmux would keep a program's request for enhanced keys to itself, so the
+  page sends Shift+Enter in a remote tab as the enhanced key (`ESC [13;2u`),
+  and the machine's tmux is set to pass such keys on (`extended-keys
+  always`, with the `extkeys` terminal feature set before attaching).
 - **Delete, not close.** A remote tab has no Close: right-click it for
   **Delete the VM / account…** (live or dotted), which deletes the machine,
   and the tab goes with it. It works on a stuck tab too. Every delete asks
@@ -207,14 +212,14 @@ disagreeing about it.
 
 Right-click the blue `dtmux` at the top right (or long-press it) to choose
 how a drag in a terminal works; the same menu has the soft and hard restarts.
-**Smart**: programs that ask for the mouse (tmux, vim, coding agents) get the
-clicks and drags. **Plain**: the page selects the text itself, instantly, for
-Cmd+C, whatever the program wants; the wheel still goes to the program. In
-plain mode Ctrl+C copies too while text is selected (and interrupts, as ever,
-when nothing is). Links open with a click in plain mode, and with
-Cmd+click in either mode (in smart mode a program that wants the mouse gets
-plain clicks). Plain
-is the one for remote tabs, where the VM's tmux would otherwise do the
+**Mouse integration**: programs that ask for the mouse (tmux, vim, coding
+agents) get the clicks and drags. **Mouse selection**: the page selects the
+text itself, instantly, for Cmd+C, whatever the program wants; the wheel
+still goes to the program. In mouse selection Ctrl+C copies too while text
+is selected (and interrupts, as ever, when nothing is). Links open with a
+click in mouse selection, and with Cmd+click in either mode (with mouse
+integration a program that wants the mouse gets plain clicks). Mouse
+selection is the one for remote tabs, where the VM's tmux would otherwise do the
 selecting, a round trip away. Option+drag selects text in either mode.
 
 ### A soft restart is always enough

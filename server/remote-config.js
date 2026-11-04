@@ -35,11 +35,16 @@ import path from 'node:path';
 // dtmux joins them again later. Always tmux: it is installed when missing.
 // Its status line is off (the page has tabs) and the mouse on (the wheel
 // scrolls its history). Made-up keys there split, select, zoom and close
-// its panes (remote-keys.js), so those act on the machine's panes. Set on
+// its panes (remote-keys.js), so those act on the machine's panes.
+// Extended keys: Shift+Enter (sent enhanced by the page) reaches the
+// program as Shift+Enter (ESC [13;2u), not Enter: a new line in Claude Code.
+// tmux reads enhanced keys only from a terminal it knows has them, which it
+// decides as the client attaches, so that comes before new-session. Set on
 // every attach, so a tab gets them when it next connects.
 export const DEFAULT_ATTACH =
   'command -v tmux >/dev/null || { echo "Installing tmux..."; sudo -n apt-get install -y -qq tmux >/dev/null; }; ' +
-  'exec tmux new-session -A -s dtmux \\; set -g status off \\; set -g mouse on \\; ' +
+  "exec tmux start-server \\; set -s extended-keys always \\; set -s terminal-features[90] '*:extkeys' \\; " +
+  'new-session -A -s dtmux \\; set -g status off \\; set -g mouse on \\; ' +
   remoteBindings(shellQuote);
 
 const NAME = /^[a-z][a-z0-9-]{0,30}$/;

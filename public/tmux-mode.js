@@ -46,7 +46,7 @@ export function startTmuxMode({ container, toolbar, params }) {
   let prefixArmed = false;
   const swallowedKeyUps = new Set();
 
-  // While the daemon is unreachable: { tries, countEl }. Loopback is cheap,
+  // While the daemon is unreachable: { overlayTimer }. Loopback is cheap,
   // so retry often and come back as soon as the daemon does.
   const RETRY_MS = 333;
   let retry = null;
@@ -161,6 +161,7 @@ export function startTmuxMode({ container, toolbar, params }) {
   // if that takes a while, say how to start the daemon again; a restart is
   // usually back before then.
   const OVERLAY_DELAY_MS = 1500;
+  const RESTART_OVERLAY_DELAY_MS = 15000;
   function retryConnect(reason) {
     if (!retry) {
       // The panes stay on screen, dimmed: after a soft restart the same tmux
@@ -171,25 +172,23 @@ export function startTmuxMode({ container, toolbar, params }) {
       const restarting = reason === 'dtmux restarting';
       const stopped = reason === 'dtmux stopping';
       toolbar.setStatus(restarting ? 'restarting…' : stopped ? 'stopped' : 'reconnecting…', restarting ? '' : 'bad');
-      retry = { tries: 0, countEl: document.createElement('p') };
-      retry.overlayTimer = setTimeout(() => showRetryOverlay(stopped || restarting), restarting ? OVERLAY_DELAY_MS * 2 : OVERLAY_DELAY_MS);
+      retry = {};
+      // A restart asked for shows only "restarting…" up top (closing coding
+      // agents first can take seconds); the explanation comes if it lasts.
+      retry.overlayTimer = setTimeout(() => showRetryOverlay(stopped || restarting), restarting ? RESTART_OVERLAY_DELAY_MS : OVERLAY_DELAY_MS);
     }
-    retry.tries++;
-    retry.countEl.textContent = `attempt ${retry.tries}`;
     setTimeout(connect, RETRY_MS);
   }
   function showRetryOverlay(stopped) {
     if (!retry) return;
     dropPanes();
     {
-      const { countEl } = retry;
       const box = document.createElement('div');
       box.className = 'tmux-overlay';
       const lost = document.createElement('p');
       lost.textContent = stopped
         ? 'dtmux is not running. Its windows are saved and come back as dotted tabs once it runs again. Reconnecting by itself, three times a second.'
         : 'Lost the connection to the dtmux daemon. Reconnecting by itself, three times a second.';
-      countEl.className = 'muted';
       const hint = document.createElement('p');
       hint.textContent = 'If the daemon is stopped, start it again:';
       const cmd = document.createElement('div');
@@ -208,7 +207,7 @@ export function startTmuxMode({ container, toolbar, params }) {
         setTimeout(() => (copy.textContent = 'Copy'), 1500);
       });
       cmd.append(code, copy);
-      box.append(lost, countEl, hint, cmd);
+      box.append(lost, hint, cmd);
       stage.append(box);
     }
   }
@@ -1247,6 +1246,17 @@ export function startTmuxMode({ container, toolbar, params }) {
       return false;
     }
     if (e.type === 'keyup') return !swallowedKeyUps.delete(e.code);
+    // Shift+Enter in a remote tab: the machine's tmux keeps a program's
+    // request for enhanced keys (Claude Code's) to itself, so this terminal
+    // would send a plain Enter. Send the enhanced Shift+Enter instead; the
+    // machine's tmux passes it on (extended-keys, in DEFAULT_ATTACH).
+    if (e.type === 'keydown' && e.key === 'Enter' && e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey && !prefixArmed) {
+      if (liveWindows.find((w) => w.id === activeWindow)?.remote && activePane) {
+        e.preventDefault();
+        send({ t: 'in', p: activePane, d: '\x1b[13;2u' });
+        return false;
+      }
+    }
     if (e.type !== 'keydown' || !prefix) return true;
     const name = tmuxKeyName(e);
     if (prefixArmed) {
@@ -1392,14 +1402,14 @@ export function startTmuxMode({ container, toolbar, params }) {
   }
   const selectItems = () => [
     [
-      'Smart selection',
+      'Mouse integration',
       'Programs that use the mouse (tmux, vim, agents) get clicks and drags. Option+drag still selects text.',
       () => setPlainSelect(false),
       '',
       !plainSelect,
     ],
     [
-      'Plain selection',
+      'Mouse selection',
       'Dragging selects text here, instantly, for Cmd+C; programs get no clicks.',
       () => setPlainSelect(true),
       '',

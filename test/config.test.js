@@ -52,7 +52,7 @@ test('a remote gets its defaults, with ~ expanded', () => {
   assert.equal(r.jump, null);
   assert.equal(r.user, 'ubuntu');
   assert.equal(r.identity, null);
-  assert.match(r.attach, /tmux new-session -A/);
+  assert.match(r.attach, /new-session -A -s dtmux/);
 });
 
 test('remote settings are checked strictly', () => {
