@@ -711,6 +711,23 @@ export function startTmuxMode({ container, toolbar, params }) {
   // Tabs are updated in place, never rebuilt, so nothing under the pointer
   // moves or loses its press when a state arrives.
   let tabItems = new Map(); // key -> current tab item
+  // A newly active tab scrolled out of sight (switched to from the keyboard)
+  // slides into view, with a bit of its neighbour showing. Only when the
+  // active tab changes, so scrolling the tab bar by hand is left alone.
+  let shownActive = null;
+  function revealTab(el) {
+    const bar = toolbar.tabs;
+    if (!el || bar.scrollWidth <= bar.clientWidth) return;
+    const margin = 24;
+    const r = el.getBoundingClientRect();
+    const left = r.left - bar.getBoundingClientRect().left + bar.scrollLeft;
+    const right = left + r.width;
+    let to = null;
+    if (left - margin < bar.scrollLeft) to = left - margin;
+    else if (right + margin > bar.scrollLeft + bar.clientWidth) to = right + margin - bar.clientWidth;
+    if (to !== null) bar.scrollTo({ left: Math.max(0, to), behavior: 'smooth' });
+  }
+
   function renderTabs() {
     if (!haveState || draggingTab) return;
     toolbar.tabs.classList.remove('offline');
@@ -752,6 +769,11 @@ export function startTmuxMode({ container, toolbar, params }) {
       const want = prev ? prev.nextSibling : toolbar.tabs.firstChild;
       if (want !== el) toolbar.tabs.insertBefore(el, want);
       prev = el;
+    }
+    const active = tabs.find((t) => t.kind === 'live' && t.w.active)?.key ?? null;
+    if (active !== shownActive) {
+      shownActive = active;
+      if (active) revealTab(tabEls.get(active));
     }
     // A reopened window joins tmux's list last; move it to its tab's place.
     if (landed) syncTmuxOrder();
