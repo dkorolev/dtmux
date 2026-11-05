@@ -38,6 +38,8 @@ let remote;
 let kind;
 let mayCreate = flags.includes('--new');
 let making = false;
+// This helper made the machine: its tmux is new, not lost.
+let madeHere = false;
 let hungUp = false;
 // The tab is gone: its terminal is too, so writes to it are dropped.
 process.on('SIGHUP', () => {
@@ -121,6 +123,7 @@ async function make() {
     if (!kind.namedByCreate) recordMachine(name, host);
     const m = await kind.create(remote, host, say);
     recordMachine(name, m.host);
+    madeHere = true;
     if (m.host !== host) {
       host = m.host;
       adopt(host);
@@ -162,21 +165,48 @@ async function connect(address, fresh, { probe = false } = {}) {
   const started = Date.now();
   let tries = 0;
   let booting = false;
+  // When the machine's tmux started, as last seen. Joining again and finding
+  // no tmux, or one started since, means the shells that ran there ended:
+  // that is said, not covered up by a new empty session.
+  let tmuxSince = null;
+  let expectNew = fresh || madeHere;
   try {
     for (;;) {
       if (!booting && (tries || !probe)) say(`ssh ${user}@${address}${remote.jump ? ` via ${remote.jump}` : ''}  (${remote.label} ${kind.noun} ${host})`);
-      // Once ssh is in (and its shared connection up), not alongside it.
-      const first = kind.keepAlive ? setTimeout(touch, 10000) : null;
-      // Ctrl+C belongs to the remote side while ssh runs.
-      const keep = () => {};
-      process.on('SIGINT', keep);
-      const code = await new Promise((resolve) => {
-        const child = spawn('ssh', ['-t', ...base, remote.attach], { stdio: 'inherit' });
-        child.on('error', () => resolve(255));
-        child.on('close', (c) => resolve(c ?? 255));
-      });
-      process.off('SIGINT', keep);
-      clearTimeout(first);
+      // Asked first, over the same shared connection; could not ask: ssh is
+      // not getting through, so it is not tried a second time.
+      const since = await remoteTmuxStart(base);
+      let code = 255;
+      if (since !== null) {
+        if (since === 0 ? !expectNew : tmuxSince !== null && since !== tmuxSince) {
+          shellsEnded(since, tmuxSince);
+          if (!(await ask(`Press Enter to ${since ? 'join the tmux there now' : 'start a new tmux there'}, Ctrl+C for other choices.`))) {
+            const next = await ended(`The shells on ${remote.label} ${kind.noun} ${host} ended`);
+            if (next !== 'reconnect') return;
+            tries = 0;
+            continue;
+          }
+        }
+        expectNew = false;
+        if (since) tmuxSince = since;
+        // Once ssh is in (and its shared connection up), not alongside it.
+        const first = kind.keepAlive ? setTimeout(touch, 10000) : null;
+        // A tmux this join started: note when, to know it again next time.
+        const learn = tmuxSince
+          ? null
+          : setTimeout(() => remoteTmuxStart(base).then((s) => s && (tmuxSince ??= s)), 5000);
+        // Ctrl+C belongs to the remote side while ssh runs.
+        const keep = () => {};
+        process.on('SIGINT', keep);
+        code = await new Promise((resolve) => {
+          const child = spawn('ssh', ['-t', ...base, remote.attach], { stdio: 'inherit' });
+          child.on('error', () => resolve(255));
+          child.on('close', (c) => resolve(c ?? 255));
+        });
+        process.off('SIGINT', keep);
+        clearTimeout(first);
+        clearTimeout(learn);
+      }
       if (code !== 255) {
         // ssh came back on its own: the machine's tmux either ended (its last
         // shell exited, Ctrl+D) or was only detached. Ended: the machine has
@@ -186,6 +216,7 @@ async function connect(address, fresh, { probe = false } = {}) {
         if (alive === false) {
           say(`The last shell on ${remote.label} ${kind.noun} ${host} exited.`);
           if (await removeMachine()) return;
+          expectNew = true; // kept: joining again starts a new tmux, as it should
         }
         const why = alive ? `The session on ${remote.label} ${kind.noun} ${host} was detached` : `ssh to ${host} ended`;
         const next = await ended(why);
@@ -274,6 +305,34 @@ function remoteTmux(base) {
     child.on('error', () => resolve(null));
     child.on('close', () => resolve(/alive/.test(out) ? true : /gone/.test(out) ? false : null));
   });
+}
+
+// When the machine's tmux server started (unix seconds), 0 when none runs
+// there, null when the machine could not be asked.
+function remoteTmuxStart(base) {
+  return new Promise((resolve) => {
+    let out = '';
+    const child = spawn('ssh', [...base, "tmux display-message -p '#{start_time}' 2>/dev/null || echo none"], { stdio: ['ignore', 'pipe', 'ignore'] });
+    child.stdout.on('data', (d) => (out += d));
+    child.on('error', () => resolve(null));
+    child.on('close', (code) => {
+      if (code === 255) return resolve(null);
+      const m = /^(\d{9,11})\s*$/m.exec(out);
+      resolve(m ? Number(m[1]) : /none/.test(out) ? 0 : null);
+    });
+  });
+}
+
+// The tmux on the machine is gone (`since` 0) or another one runs there
+// (started at `since`; the one before at `before`): what ran in it ended.
+function shellsEnded(since, before) {
+  const what = `${remote.label} ${kind.noun} ${host}`;
+  const at = (s) => new Date(s * 1000).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+  const red = (text) => say(text, '1;31');
+  if (since) red(`The tmux on ${what} started again at ${at(since)} (the one before ran since ${at(before)}).`);
+  else red(`There is no tmux on ${what} any more.`);
+  red('The shells and coding agents that ran there have ended: the machine restarted or ran out of memory, or its tmux was killed.');
+  red('An agent can be picked up again from its directory there: claude --resume, codex resume.');
 }
 
 // Sleep, cut short by Ctrl+C: resolves true when it was.
