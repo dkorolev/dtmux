@@ -41,10 +41,23 @@ import path from 'node:path';
 // tmux reads enhanced keys only from a terminal it knows has them, which it
 // decides as the client attaches, so that comes before new-session. Set on
 // every attach, so a tab gets them when it next connects.
+//
+// Ctrl+D in the last shell deletes the machine, a killed tmux or shell does
+// not, and the two look the same from here (ssh exits 0 either way). So a
+// pane that ends is kept for a moment (remain-on-exit), and when it is the
+// last one and its program exited by itself (no signal: Ctrl+D, `exit`),
+// ENDED_MARKER gets the time before the pane closes. Killed (out of memory,
+// kill-server, kill-session, a signal), there is no marker. Cleared on
+// every attach, so only a fresh one counts.
+export const ENDED_MARKER = '~/.dtmux-ended';
+const LAST_PANE_EXITED = '#{&&:#{==:#{pane_dead_signal},},#{==:#{server_sessions}#{session_windows}#{window_panes},111}}';
+const ON_PANE_DIED = `if -F "${LAST_PANE_EXITED}" "run-shell \\"date +%s > ${ENDED_MARKER}\\"" ; kill-pane`;
 export const DEFAULT_ATTACH =
   'command -v tmux >/dev/null || { echo "Installing tmux..."; sudo -n apt-get install -y -qq tmux >/dev/null; }; ' +
+  `rm -f ${ENDED_MARKER}; ` +
   "exec tmux start-server \\; set -s extended-keys always \\; set -s terminal-features[90] '*:extkeys' \\; " +
   'new-session -A -s dtmux \\; set -g status off \\; set -g mouse on \\; ' +
+  `set -g remain-on-exit on \\; set-hook -g pane-died ${shellQuote(ON_PANE_DIED)} \\; ` +
   remoteBindings(shellQuote);
 
 const NAME = /^[a-z][a-z0-9-]{0,30}$/;

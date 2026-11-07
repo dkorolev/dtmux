@@ -133,15 +133,20 @@ remotes:
   you to type four random digits it shows, then **Confirm delete** (or
   Enter); a single press of Enter on a red button is not enough.
   **Disconnect** keeps the machine, with a dotted tab to join it again.
-- **Nothing is deleted behind your back.** When the machine's tmux ends
-  (its last shell exited, or something killed it: out of memory, a tool's
-  `tmux kill-server`), or was only detached, or cannot be asked, the machine
-  stays: the tab offers **Reconnect** (a new tmux, your files untouched) and
-  **Delete the VM… / account…** (the terminal takes Enter and `d` for the
-  same; `d` then asks for the four digits too), as it does when the
-  connection is down and you press Ctrl+C. The page hears of it at once
+- **Ctrl+D deletes; a crash does not.** When the last shell on the machine
+  exits by itself (Ctrl+D, `exit`), the machine is deleted and the tab
+  closes. Its tmux tells that apart from being killed: it keeps an ended
+  pane for a moment, and only a last shell that exited without a signal
+  leaves a marker (`~/.dtmux-ended`) as tmux ends. When the tmux was killed
+  instead (out of memory, a tool's `tmux kill-server` or `kill-session`, a
+  signal to the shell), was only detached, or cannot be asked, nothing is
+  deleted: the tab stays with **Reconnect** (a new tmux, your files
+  untouched) and **Delete the VM… / account…** (the terminal takes Enter and
+  `d` for the same; `d` then asks for the four digits too), as it does when
+  the connection is down and you press Ctrl+C. The page hears of it at once
   through a tmux format subscription on the window option
-  `@dtmux_remote_state`.
+  `@dtmux_remote_state`. A custom `attach:` leaves no marker, so it never
+  deletes on its own.
 - **Every delete is logged.** Whatever deletes a machine (the page, a tab,
   the sweep) writes a line to `~/.dtmux/dtmux.log` first, saying why, and
   another once it is done.

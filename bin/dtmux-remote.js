@@ -25,6 +25,7 @@ import { kindOf, MUX_DIR, transient, deleteMachine } from '../server/remote-kind
 import { recordMachine, dropMachine } from '../server/machine-ledger.js';
 import { TMUX_BIN } from '../server/tmux-control.js';
 import { sshArgs, KNOWN_HOSTS } from '../server/remote-ssh.js';
+import { ENDED_MARKER } from '../server/remote-config.js';
 
 const [name, firstHost, ...flags] = process.argv.slice(2);
 const flag = (f) => (flags.includes(f) ? flags[flags.indexOf(f) + 1] ?? null : null);
@@ -208,19 +209,28 @@ async function connect(address, fresh, { probe = false } = {}) {
         clearTimeout(learn);
       }
       if (code !== 255) {
-        // ssh came back on its own: the machine's tmux either ended or was
-        // only detached. Either way the machine stays, and you choose. It is
-        // never deleted here: tmux ending looks the same whether you closed
-        // the last shell or something killed it (out of memory, a tool's
-        // `tmux kill-server`), and deleting takes the files with it.
-        const alive = await remoteTmux(base);
-        if (alive === false) expectNew = true; // joining again starts a new tmux, as it should
+        // ssh came back on its own: the machine's tmux ended or was only
+        // detached. Ctrl+D (or `exit`) in its last shell deletes the machine
+        // and closes the tab: tmux exited cleanly (ssh exits 0) and left the
+        // marker that only a last shell exiting by itself writes (see
+        // ENDED_MARKER). Anything else, a killed tmux or shell among them
+        // (out of memory, a tool's `tmux kill-server`), keeps the machine,
+        // and you choose: deleting takes the files with it.
+        const state = await remoteTmux(base);
         const what = `${remote.label} ${kind.noun} ${host}`;
-        const why = alive
-          ? `The session on ${what} was detached`
-          : alive === false
-            ? `The tmux on ${what} ended (its last shell exited, or it was killed)`
-            : `ssh to ${host} ended`;
+        if (state === 'exited' && code === 0) {
+          say(`The last shell on ${what} exited.`);
+          if (await removeMachine('its last shell exited by itself (Ctrl+D or exit), so tmux ended cleanly')) return;
+        }
+        if (state === 'exited' || state === 'gone') expectNew = true; // joining again starts a new tmux, as it should
+        const why =
+          state === 'alive'
+            ? `The session on ${what} was detached`
+            : state === 'gone'
+              ? `The tmux on ${what} ended without its last shell exiting: it was killed`
+              : state === 'exited'
+                ? `The tmux on ${what} ended`
+                : `ssh to ${host} ended`;
         const next = await ended(why);
         if (next === 'reconnect') {
           tries = 0;
@@ -297,15 +307,20 @@ async function removeMachine(why) {
   return true;
 }
 
-// Does the machine's tmux still run (a session detached, not ended)? true,
-// false, or null when the machine could not be asked.
+// What became of the machine's tmux: 'alive' (a session detached, not
+// ended), 'exited' (it ended because its last shell exited by itself: a
+// marker from the last minute), 'gone' (it ended otherwise), or null when
+// the machine could not be asked. The marker is used up either way.
 function remoteTmux(base) {
+  const ask =
+    `tmux ls >/dev/null 2>&1 && echo alive || { f=${ENDED_MARKER}; ` +
+    'if [ -f $f ] && [ $(( $(date +%s) - $(cat $f) )) -lt 60 ]; then echo exited; else echo gone; fi; rm -f $f; }';
   return new Promise((resolve) => {
     let out = '';
-    const child = spawn('ssh', [...base, 'tmux ls >/dev/null 2>&1 && echo alive || echo gone'], { stdio: ['ignore', 'pipe', 'ignore'] });
+    const child = spawn('ssh', [...base, ask], { stdio: ['ignore', 'pipe', 'ignore'] });
     child.stdout.on('data', (d) => (out += d));
     child.on('error', () => resolve(null));
-    child.on('close', () => resolve(/alive/.test(out) ? true : /gone/.test(out) ? false : null));
+    child.on('close', () => resolve(/alive|exited|gone/.exec(out)?.[0] ?? null));
   });
 }
 
