@@ -6,14 +6,15 @@
 // all of those. A machine recorded in the ledger (machine-ledger.js) is kept
 // while a live window (the @dtmux_remote option), a dotted tab (saved
 // windows) or the crash snapshot names it. One that none names in two sweeps
-// in a row, and that was recorded minutes ago, is deleted; one that is gone
-// already (expired, deleted elsewhere) just leaves the ledger.
+// in a row, and that was recorded minutes ago, is deleted, unless its kind
+// says not to (devbox accounts: they expire on their own when idle); one
+// that is gone already (expired, deleted elsewhere) just leaves the ledger.
 import { execFile } from 'node:child_process';
 import { TMUX_BIN, tmuxArgs } from './tmux-control.js';
 import { allSaved } from './saved-windows.js';
 import { readSnapshot } from './live-snapshot.js';
 import { REMOTE_OPTION, parseRemote, currentRemotes } from './remotes.js';
-import { kindOf } from './remote-kinds.js';
+import { kindOf, deleteMachine } from './remote-kinds.js';
 import { listMachines, dropMachine } from './machine-ledger.js';
 
 // DTMUX_SWEEP_MS: a shorter interval, for trying it out.
@@ -44,6 +45,7 @@ async function wanted() {
 }
 
 const unseen = new Set(); // keys no tab named in the last sweep
+const leftAlone = new Set(); // tabless machines of kinds the sweep does not delete, already logged
 
 export async function sweepMachines(log) {
   let machines, remotes;
@@ -73,13 +75,15 @@ export async function sweepMachines(log) {
     try {
       const found = await kind.lookup(remote, m.host);
       if (found.making) continue; // delete it once it is made
-      if (found.address) {
-        log(`machine sweep: deleting ${remote.label} ${kind.noun} ${m.host}, which no tab stands for`);
-        await kind.remove(remote, m.host);
+      if (found.address && kind.sweep === false) {
+        // Left alone (see the kind); said once, not every sweep.
+        if (!leftAlone.has(k)) log(`machine sweep: no tab stands for ${remote.label} ${kind.noun} ${m.host}; left alone (${kind.lifetime(remote)})`);
+        leftAlone.add(k);
+        continue;
       }
+      if (found.address) await deleteMachine(remote, m.host, 'machine sweep: no tab stands for it, in two sweeps in a row');
       dropMachine(m.remote, m.host);
       unseen.delete(k);
-      if (found.address) log(`machine sweep: deleted ${m.host}`);
     } catch (e) {
       log(`machine sweep: ${k}: ${e.message}; trying again later`);
     }

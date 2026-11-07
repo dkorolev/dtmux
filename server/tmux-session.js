@@ -68,7 +68,7 @@ import { listPanes, agentsByPane, panesOf, windowAgent } from './window-panes.js
 import { events as containerEvents, containerStatus, ensureImage } from './gh-check.js';
 import { hostStatus, cleanCheck, machineStatus, instrument, uninstrument } from './gh-remote.js';
 import { readConnectors, saveConnectors } from './settings.js';
-import { kindOf } from './remote-kinds.js';
+import { kindOf, deleteMachine } from './remote-kinds.js';
 import { dropMachine } from './machine-ledger.js';
 
 const HISTORY_LINES = 10000; // keep in sync with the browser's scrollback
@@ -140,8 +140,9 @@ const pageEntry = ({ id, name, dir, branch, agent, remote }) => ({
   remote: remote ?? null,
 });
 
-// Delete a remote tab's machine for good; `send` reports how it went.
-function deleteMachine(where, send) {
+// Delete a remote tab's machine for good, the page having asked (`why`, for
+// the log); `send` reports how it went.
+function deleteTabMachine(where, why, send) {
   let remote;
   try {
     remote = currentRemotes()[where.name];
@@ -151,7 +152,7 @@ function deleteMachine(where, send) {
   if (!remote) return send({ t: 'notice', text: `No remote "${where.name}" in ~/.dtmux.yaml: ${where.host} was not deleted.`, kind: 'bad' });
   const kind = kindOf(remote);
   send({ t: 'notice', text: `Deleting ${remote.label} ${kind.noun} ${where.host}…` });
-  kind.remove(remote, where.host).then(
+  deleteMachine(remote, where.host, `page: ${why}`).then(
     () => {
       try {
         dropMachine(where.name, where.host);
@@ -765,7 +766,7 @@ function bridge(ws, opts) {
   // Drop a saved (dotted) tab for good; a remote one's machine goes with it.
   function forgetSaved(id) {
     const entry = takeSaved(session, id);
-    if (entry?.remote) deleteMachine(entry.remote, send);
+    if (entry?.remote) deleteTabMachine(entry.remote, 'Delete on its dotted tab (code typed)', send);
   }
 
   // Close a window for good: no dotted tab. From outside the window, so a
@@ -781,7 +782,7 @@ function bridge(ws, opts) {
       execFile(TMUX_BIN, tmuxArgs('kill-window', '-t', w), (e, _o, stderr) => {
         if (e && !/can't find window/.test(stderr)) send({ t: 'notice', text: `Could not close the window: ${stderr.trim() || e.message}`, kind: 'bad' });
       });
-      if (where) deleteMachine(where, send);
+      if (where) deleteTabMachine(where, 'Delete on its tab (code typed)', send);
     });
   }
 

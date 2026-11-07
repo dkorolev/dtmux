@@ -133,20 +133,26 @@ remotes:
   you to type four random digits it shows, then **Confirm delete** (or
   Enter); a single press of Enter on a red button is not enough.
   **Disconnect** keeps the machine, with a dotted tab to join it again.
-- **Ctrl+D deletes.** When the last shell on the machine exits (its tmux
-  ends), the machine is deleted and the tab closes. If the machine's tmux was
-  only detached, or cannot be asked, nothing is deleted: the tab stays with
-  **Reconnect** and **Delete the VM… / account…** (the terminal takes Enter
-  and `d` for the same; `d` then asks for the four digits too), as it does when the connection is down and you
-  press Ctrl+C. The page hears of it at once through a tmux format
-  subscription on the window option `@dtmux_remote_state`.
-- **No machine is left behind.** Every machine dtmux makes is recorded in
+- **Nothing is deleted behind your back.** When the machine's tmux ends
+  (its last shell exited, or something killed it: out of memory, a tool's
+  `tmux kill-server`), or was only detached, or cannot be asked, the machine
+  stays: the tab offers **Reconnect** (a new tmux, your files untouched) and
+  **Delete the VM… / account…** (the terminal takes Enter and `d` for the
+  same; `d` then asks for the four digits too), as it does when the
+  connection is down and you press Ctrl+C. The page hears of it at once
+  through a tmux format subscription on the window option
+  `@dtmux_remote_state`.
+- **Every delete is logged.** Whatever deletes a machine (the page, a tab,
+  the sweep) writes a line to `~/.dtmux/dtmux.log` first, saying why, and
+  another once it is done.
+- **No VM is left behind.** Every machine dtmux makes is recorded in
   `~/.dtmux/machines.json` the moment its name is known (a tab closed while
   its machine is still being made records it all the same). Every 2 minutes
-  the daemon deletes recorded machines that no tab, live or dotted, stands
-  for in two checks in a row: tabs that went without Delete (tmux's own
-  kill-window, a crashed helper) take their machine with them too. Machines
-  dtmux did not make are never touched.
+  the daemon deletes recorded LunaNode VMs that no tab, live or dotted,
+  stands for in two checks in a row: tabs that went without Delete (tmux's
+  own kill-window, a crashed helper) take their VM with them too. A devbox
+  account without a tab is left alone (logged once): devbox-ctl deletes it
+  after 24 idle hours anyway. Machines dtmux did not make are never touched.
 - **Uptime.** A tab's tooltip counts from when its machine was ready, not
   from when the tab opened.
 - Host keys go to `~/.dtmux/known_hosts`, not your own: VM addresses are

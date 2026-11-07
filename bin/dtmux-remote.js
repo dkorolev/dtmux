@@ -21,7 +21,7 @@ import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { loadConfig } from '../server/config.js';
 import { STATE_DIR } from '../server/paths.js';
-import { kindOf, MUX_DIR, transient } from '../server/remote-kinds.js';
+import { kindOf, MUX_DIR, transient, deleteMachine } from '../server/remote-kinds.js';
 import { recordMachine, dropMachine } from '../server/machine-ledger.js';
 import { TMUX_BIN } from '../server/tmux-control.js';
 import { sshArgs, KNOWN_HOSTS } from '../server/remote-ssh.js';
@@ -208,17 +208,19 @@ async function connect(address, fresh, { probe = false } = {}) {
         clearTimeout(learn);
       }
       if (code !== 255) {
-        // ssh came back on its own: the machine's tmux either ended (its last
-        // shell exited, Ctrl+D) or was only detached. Ended: the machine has
-        // nothing left to do, so it is deleted and the tab closes. Detached,
-        // or not sure: it stays, and you choose.
+        // ssh came back on its own: the machine's tmux either ended or was
+        // only detached. Either way the machine stays, and you choose. It is
+        // never deleted here: tmux ending looks the same whether you closed
+        // the last shell or something killed it (out of memory, a tool's
+        // `tmux kill-server`), and deleting takes the files with it.
         const alive = await remoteTmux(base);
-        if (alive === false) {
-          say(`The last shell on ${remote.label} ${kind.noun} ${host} exited.`);
-          if (await removeMachine()) return;
-          expectNew = true; // kept: joining again starts a new tmux, as it should
-        }
-        const why = alive ? `The session on ${remote.label} ${kind.noun} ${host} was detached` : `ssh to ${host} ended`;
+        if (alive === false) expectNew = true; // joining again starts a new tmux, as it should
+        const what = `${remote.label} ${kind.noun} ${host}`;
+        const why = alive
+          ? `The session on ${what} was detached`
+          : alive === false
+            ? `The tmux on ${what} ended (its last shell exited, or it was killed)`
+            : `ssh to ${host} ended`;
         const next = await ended(why);
         if (next === 'reconnect') {
           tries = 0;
@@ -270,19 +272,19 @@ async function ended(why) {
       const key = await askKey(`Enter: reconnect · d: delete the ${kind.noun} (and this tab)`, ['\r', '\n', 'd', 'D']);
       if (key === null) return 'close';
       if (key === '\r' || key === '\n') return 'reconnect';
-      if ((await askCode()) && (await removeMachine())) return 'deleted';
+      if ((await askCode()) && (await removeMachine(`you pressed d in the tab and typed the code (${why})`))) return 'deleted';
     }
   } finally {
     tmux('set-option', '-wu', '@dtmux_remote_state');
   }
 }
 
-// Delete this tab's machine; true when it is gone. The tab closes when the
-// helper exits after this.
-async function removeMachine() {
+// Delete this tab's machine, you having asked (`why`, for the log); true
+// when it is gone. The tab closes when the helper exits after this.
+async function removeMachine(why) {
   say(`Deleting ${remote.label} ${kind.noun} ${host}…`);
   try {
-    await kind.remove(remote, host);
+    await deleteMachine(remote, host, `tab: ${why}`);
   } catch (e) {
     warn(`Could not delete ${host}: ${e.message}`);
     return false;

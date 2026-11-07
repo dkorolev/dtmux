@@ -24,6 +24,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { shellQuote } from './agent-resume.js';
+import { STATE_DIR, LOG_FILE } from './paths.js';
 
 // ssh master connections. A short, fixed directory: a unix socket path has a
 // ~104-byte limit, which a path under the state directory can exceed.
@@ -224,6 +225,9 @@ const devbox = {
   user: (r, host) => host,
   namedByCreate: true,
   keepAlive: true,
+  // The sweep leaves a tabless account alone: devbox-ctl deletes it after 24
+  // idle hours anyway, and a tab lost by mistake must not take its files.
+  sweep: false,
 
   async lookup(remote, host) {
     if (!DEVBOX_NAME.test(host)) return { none: true };
@@ -247,3 +251,27 @@ const devbox = {
 
 export const KINDS = { 'lunanode-ctl': lunanode, 'devbox-ctl': devbox };
 export const kindOf = (remote) => KINDS[remote.kind];
+
+// Every machine deletion goes through here, wherever it comes from (the page,
+// a tab, the sweep), and is written to dtmux.log with why, before and after:
+// a deleted machine takes its files with it, so there must be a record.
+export async function deleteMachine(remote, host, why) {
+  const kind = kindOf(remote);
+  const what = `${remote.label} ${kind.noun} ${host}`;
+  record(`deleting ${what}: ${why}`);
+  try {
+    await kind.remove(remote, host);
+  } catch (e) {
+    record(`could not delete ${what}: ${e.message}`);
+    throw e;
+  }
+  record(`deleted ${what}`);
+}
+
+// A line in dtmux.log from any process (the daemon, a tab's helper).
+function record(msg) {
+  try {
+    fs.mkdirSync(STATE_DIR, { recursive: true });
+    fs.appendFileSync(LOG_FILE, `${new Date().toISOString()} [${process.pid}] ${msg}\n`);
+  } catch {}
+}
