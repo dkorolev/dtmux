@@ -264,6 +264,16 @@ integration a program that wants the mouse gets plain clicks). Mouse
 selection is the one for remote tabs, where the VM's tmux would otherwise do the
 selecting, a round trip away. Option+drag selects text in either mode.
 
+## Text size
+
+The same menu has a **Text size** row: − and + step it a pixel at a time
+and leave the menu open, and the percentage between them (of the default
+13px) goes back to 100%. Cmd+= / Cmd+- / Cmd+0 in a terminal do the same.
+The size is remembered in this browser. The panes and tmux's window size follow at once,
+and again whenever the page's pixel ratio changes (the window moved to
+another screen, or the page zoomed), so the last rows never end up below
+the pane, out of sight.
+
 ### A soft restart is always enough
 
 Any change to dtmux itself (server, page, dependencies) is picked up by a

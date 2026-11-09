@@ -7,7 +7,7 @@
 // by xterm.js for whatever the program asked for (Shift+Enter included). The
 // tmux prefix key is the exception: prefix sequences go through tmux's own
 // key bindings, so splits, new windows and the rest keep working.
-import { createTerminal, leaveQueriesToTmux, base64ToBytes, socketUrl } from './terminal-common.js';
+import { createTerminal, leaveQueriesToTmux, base64ToBytes, socketUrl, DEFAULT_TEXT_SIZE, TEXT_SIZE_MIN, TEXT_SIZE_MAX, textSize, saveTextSize } from './terminal-common.js';
 import { makePanels } from './panels.js';
 import { followTmuxOrder, orderTabs, parseLayout, paneBorders, tmuxKeyName, windowSwitchDirection } from './tmux-util.js';
 
@@ -18,8 +18,12 @@ export function startTmuxMode({ container, toolbar, params }) {
 
   const panes = new Map(); // pane id -> { term, el }
   const windowEls = new Map(); // window id -> element
-  const cell = measureCell(stage);
+  // The cell size follows the text size and the device pixel ratio (xterm.js
+  // rounds rows to whole device pixels), so it is measured again when either
+  // changes: see relayout.
+  let cell = measureCell(stage);
   let grid = gridSize();
+  let lastState = null; // the last 'state', to lay the panes out again
   let ws = null;
   let ended = false; // the server said goodbye; the socket closing is expected
   let taken = false; // a newer page has the session (see showTaken)
@@ -465,7 +469,9 @@ export function startTmuxMode({ container, toolbar, params }) {
     setTimeout(() => el.remove(), POPUP_MS);
   }
 
-  function applyState({ windows, panes: list }) {
+  function applyState(state) {
+    lastState = state;
+    const { windows, panes: list } = state;
     const layout = new Map();
     for (const w of windows) for (const leaf of parseLayout(w.layout)) layout.set(leaf.id, leaf);
 
@@ -1175,8 +1181,9 @@ export function startTmuxMode({ container, toolbar, params }) {
   }
 
   // A small menu at (x, y): items are [label, title, action, color?,
-  // checked?], or null for a separator. With any `checked` given, every item
-  // gets a column for the checkmark.
+  // checked?], null for a separator, or an element of its own (which handles
+  // its clicks itself, leaving the menu open). With any `checked` given,
+  // every item gets a column for the checkmark.
   function showMenu(items, x, y) {
     closeTabMenu();
     hideTip();
@@ -1187,6 +1194,10 @@ export function startTmuxMode({ container, toolbar, params }) {
     for (const item of items) {
       if (!item) {
         menu.append(document.createElement('hr'));
+        continue;
+      }
+      if (item instanceof Element) {
+        menu.append(item);
         continue;
       }
       const [label, title, run, color, checked] = item;
@@ -1288,6 +1299,15 @@ export function startTmuxMode({ container, toolbar, params }) {
   // through tmux's key tables instead of to the pane.
   function keyHandler(e) {
     if (windowSwitchDirection(e)) return false;
+    // Cmd+= / Cmd+- / Cmd+0: the text size. (The browser's zoom never saw
+    // these: xterm.js took them, as keys for the program.)
+    if (e.metaKey && !e.ctrlKey && !e.altKey && ['Equal', 'Minus', 'Digit0'].includes(e.code)) {
+      if (e.type === 'keydown') {
+        swallow(e);
+        setTextSize(e.code === 'Digit0' ? DEFAULT_TEXT_SIZE : textSize() + (e.code === 'Equal' ? 1 : -1));
+      }
+      return false;
+    }
     // Plain selection: Ctrl+C with text selected copies it (as Cmd+C does)
     // instead of interrupting; with nothing selected it interrupts as ever.
     const term = panes.get(activePane)?.term;
@@ -1342,16 +1362,81 @@ export function startTmuxMode({ container, toolbar, params }) {
       rows: Math.max(2, Math.floor(stage.clientHeight / cell.h)),
     };
   }
+  function refit() {
+    const g = gridSize();
+    if (g.cols === grid.cols && g.rows === grid.rows) return;
+    grid = g;
+    send({ t: 'size', cols: g.cols, rows: g.rows });
+  }
   let resizeTimer = null;
   new ResizeObserver(() => {
     clearTimeout(resizeTimer);
-    resizeTimer = setTimeout(() => {
-      const g = gridSize();
-      if (g.cols === grid.cols && g.rows === grid.rows) return;
-      grid = g;
-      send({ t: 'size', cols: g.cols, rows: g.rows });
-    }, 50);
+    resizeTimer = setTimeout(refit, 50);
   }).observe(stage);
+
+  // A new cell size: the panes' boxes move and resize to it, and tmux hears
+  // how many rows and columns fit now. Kept at the old cell size, the boxes
+  // and tmux's row count would be too small for rows drawn taller, and the
+  // last rows, the prompt among them, would be drawn below the pane, out of
+  // sight.
+  function relayout() {
+    cell = measureCell(stage);
+    if (lastState) applyState(lastState);
+    refit();
+  }
+  // Moving the window to a screen of another pixel density, or zooming the
+  // page, changes how tall xterm.js draws a row (15px at 2x, 16.2px at 0.8x)
+  // without resizing the stage.
+  (function watchPixelRatio() {
+    matchMedia(`(resolution: ${devicePixelRatio}dppx)`).addEventListener(
+      'change',
+      () => {
+        relayout();
+        watchPixelRatio();
+      },
+      { once: true },
+    );
+  })();
+
+  function setTextSize(n) {
+    n = saveTextSize(n);
+    if (n === cellFontSize) return;
+    cellFontSize = n;
+    for (const p of panes.values()) p.term.options.fontSize = n;
+    relayout();
+  }
+  let cellFontSize = textSize();
+  // The menu's text size row: − and + step it a pixel at a time and leave the
+  // menu open; the percentage (of the default) goes back to 100%.
+  function textSizeRow() {
+    const row = document.createElement('div');
+    row.className = 'menu-row';
+    const label = document.createElement('span');
+    label.textContent = 'Text size';
+    const button = (text, title, step) => {
+      const b = document.createElement('button');
+      b.textContent = text;
+      b.title = title;
+      b.addEventListener('click', () => {
+        setTextSize(step === 0 ? DEFAULT_TEXT_SIZE : textSize() + step);
+        show();
+      });
+      return b;
+    };
+    const smaller = button('−', 'Smaller text (Cmd+-)', -1);
+    const pct = button('', `Back to 100%, ${DEFAULT_TEXT_SIZE}px (Cmd+0)`, 0);
+    pct.className = 'pct';
+    const larger = button('+', 'Larger text (Cmd+=)', 1);
+    const show = () => {
+      const n = textSize();
+      pct.textContent = `${Math.round((n / DEFAULT_TEXT_SIZE) * 100)}%`;
+      smaller.disabled = n <= TEXT_SIZE_MIN;
+      larger.disabled = n >= TEXT_SIZE_MAX;
+    };
+    show();
+    row.append(label, smaller, pct, larger);
+    return row;
+  }
 
   const newWindowButton = toolbar.addButton('+', () => send({ t: 'new-window' }), {
     side: 'left',
@@ -1472,12 +1557,12 @@ export function startTmuxMode({ container, toolbar, params }) {
   ];
 
   // Right-click on the dtmux label (or a long press): how selecting works,
-  // and the restarts.
+  // the text size, and the restarts.
   const statusEl = document.getElementById('status');
   function showStatusMenu() {
     const r = statusEl.getBoundingClientRect();
     const settingsItem = ['Settings…', 'The gh check container, and the connectors (remotes) with their colors', () => panels.showSettings()];
-    showMenu([...selectItems(), null, settingsItem, ...(canRestart ? [null, ...restartItems()] : [])], r.right, r.bottom + 4);
+    showMenu([...selectItems(), null, textSizeRow(), null, settingsItem, ...(canRestart ? [null, ...restartItems()] : [])], r.right, r.bottom + 4);
   }
   onMenuGesture(statusEl, showStatusMenu);
   // The press, the movement and the release of a drag all go with Option,
@@ -1542,9 +1627,13 @@ function measureCell(parent) {
   parent.append(el);
   const term = createTerminal({ cols: 10, rows: 5, openExternal() {} });
   term.open(el);
-  // xterm.js has no public API for the cell size.
-  const { width, height } = term._core._renderService.dimensions.css.cell;
+  // xterm.js has no public API for the cell size. Its CSS cell size is the
+  // whole terminal's height rounded to a CSS pixel, divided by the rows: for
+  // this probe's 5 rows that is off by up to a tenth of a pixel per row, a
+  // few pixels over a full screen of rows, which then hang below the pane.
+  // The device-pixel cell, which every row is drawn at, is exact.
+  const { width, height } = term._core._renderService.dimensions.device.cell;
   term.dispose();
   el.remove();
-  return { w: width, h: height };
+  return { w: width / devicePixelRatio, h: height / devicePixelRatio };
 }

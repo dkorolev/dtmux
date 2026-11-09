@@ -237,6 +237,33 @@ body {
   display: inline-block;
   width: 1.3em;
 }
+/* A row of its own controls (the text size): they act in place, the menu
+   stays open. */
+.tab-menu .menu-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 0 0 10px;
+}
+.tab-menu .menu-row span {
+  flex: 1;
+  padding-right: 8px;
+}
+.tab-menu .menu-row button {
+  min-width: 28px;
+  padding: 6px 8px;
+  text-align: center;
+}
+.tab-menu .menu-row .pct {
+  min-width: 52px;
+  font-variant-numeric: tabular-nums;
+}
+.tab-menu .menu-row button:disabled {
+  opacity: 0.35;
+  cursor: default;
+  background: transparent;
+  color: var(--fg);
+}
 .tab-menu hr {
   width: 100%;
   margin: 4px 0;

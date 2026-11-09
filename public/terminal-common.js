@@ -5,6 +5,29 @@ import { macLineEdit, macWordEdit } from './tmux-util.js';
 
 export const SCROLLBACK = 10000;
 
+// The terminals' text size in CSS pixels, chosen in the dtmux menu (or with
+// Cmd+= / Cmd+- / Cmd+0) and remembered in this browser.
+export const DEFAULT_TEXT_SIZE = 13;
+const TEXT_SIZE_KEY = 'dtmux.textSize';
+export const TEXT_SIZE_MIN = 8;
+export const TEXT_SIZE_MAX = 32;
+const clampTextSize = (n) => Math.min(TEXT_SIZE_MAX, Math.max(TEXT_SIZE_MIN, Math.round(n)));
+export function textSize() {
+  try {
+    const n = Number(localStorage.getItem(TEXT_SIZE_KEY));
+    if (n) return clampTextSize(n);
+  } catch {}
+  return DEFAULT_TEXT_SIZE;
+}
+// Stores `n`, kept within the limits above, and returns what was stored.
+export function saveTextSize(n) {
+  n = clampTextSize(n);
+  try {
+    localStorage.setItem(TEXT_SIZE_KEY, String(n));
+  } catch {}
+  return n;
+}
+
 // A terminal with our defaults: kitty keyboard protocol on, so programs can
 // tell Shift+Enter from Enter; links handed to `openExternal`, which opens
 // them in the OS default browser; and browser-level shortcuts kept working.
@@ -15,7 +38,7 @@ export function createTerminal({ cols, rows, scrollback = SCROLLBACK, openExtern
     rows,
     cursorBlink: true,
     fontFamily: 'Menlo, "SF Mono", Monaco, Consolas, monospace',
-    fontSize: 13,
+    fontSize: textSize(),
     scrollback,
     allowProposedApi: true,
     vtExtensions: { kittyKeyboard: true },
