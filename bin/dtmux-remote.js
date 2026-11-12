@@ -24,7 +24,7 @@ import { STATE_DIR } from '../server/paths.js';
 import { kindOf, MUX_DIR, transient, deleteMachine } from '../server/remote-kinds.js';
 import { recordMachine, dropMachine } from '../server/machine-ledger.js';
 import { TMUX_BIN } from '../server/tmux-control.js';
-import { sshArgs, KNOWN_HOSTS } from '../server/remote-ssh.js';
+import { sshArgs, KNOWN_HOSTS, reconnectDelay } from '../server/remote-ssh.js';
 import { ENDED_MARKER } from '../server/remote-config.js';
 
 const [name, firstHost, ...flags] = process.argv.slice(2);
@@ -76,8 +76,9 @@ async function main() {
       return;
     } catch (e) {
       if (!transient(e)) throw e;
-      warn(`Lost touch with the controller (${e.message}); trying again in 10s…`);
-      await sleep(10000);
+      const wait = 8000 + Math.round(4000 * Math.random()); // tabs that lost it together try again apart
+      warn(`Lost touch with the controller (${e.message}); trying again in ${Math.round(wait / 1000)}s…`);
+      await sleep(wait);
     }
   }
 }
@@ -165,6 +166,8 @@ async function connect(address, fresh, { probe = false } = {}) {
   const keepAlive = kind.keepAlive ? setInterval(touch, KEEPALIVE_MS) : null;
   const started = Date.now();
   let tries = 0;
+  // Failures since ssh last got in, for how long to wait before the next try.
+  let fails = 0;
   let booting = false;
   // When the machine's tmux started, as last seen. Joining again and finding
   // no tmux, or one started since, means the shells that ran there ended:
@@ -189,6 +192,7 @@ async function connect(address, fresh, { probe = false } = {}) {
           }
         }
         expectNew = false;
+        fails = 0;
         if (since) tmuxSince = since;
         // Once ssh is in (and its shared connection up), not alongside it.
         const first = kind.keepAlive ? setTimeout(touch, 10000) : null;
@@ -255,11 +259,13 @@ async function connect(address, fresh, { probe = false } = {}) {
           return finish();
         }
       }
-      warn('The connection dropped; connecting again in 5s (Ctrl+C: other choices)…');
-      if (await interruptibleSleep(5000)) {
+      const wait = reconnectDelay(++fails);
+      warn(`The connection dropped; connecting again in ${Math.round(wait / 1000)}s (Ctrl+C: other choices)…`);
+      if (await interruptibleSleep(wait)) {
         const next = await ended(`Not connected to ${remote.label} ${kind.noun} ${host}`);
         if (next === 'reconnect') {
           tries = 0;
+          fails = 0;
           continue;
         }
         return;

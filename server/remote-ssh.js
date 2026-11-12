@@ -10,6 +10,16 @@ import { kindOf, mux, MUX_DIR } from './remote-kinds.js';
 
 export const KNOWN_HOSTS = path.join(STATE_DIR, 'known_hosts');
 
+// How long to wait before connecting again after `fails` failures in a row
+// (1, 2, ...), in ms: 3-5s, then twice as long each time up to 18-30s.
+// Spread at random, because tabs lose their connections together (a network
+// blip) and their machine's sshd turns away logins that come all at once.
+// `rand` in [0, 1).
+export function reconnectDelay(fails, rand = Math.random()) {
+  const most = Math.min(30000, 5000 * 2 ** Math.max(0, fails - 1));
+  return Math.round(most * (0.6 + 0.4 * rand));
+}
+
 // ssh's arguments up to and including user@address; a command may follow.
 export function sshArgs(remote, host, address) {
   const user = kindOf(remote).user(remote, host);

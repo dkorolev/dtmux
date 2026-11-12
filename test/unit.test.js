@@ -8,6 +8,7 @@ import { findResumeHint } from '../server/resume-hint.js';
 import { planSwaps } from '../server/tmux-session.js';
 import { parseRemote, remoteCommand } from '../server/remotes.js';
 import { remoteAction } from '../server/remote-keys.js';
+import { reconnectDelay } from '../server/remote-ssh.js';
 
 test('decodeOutput turns octal escapes back into bytes and keeps raw UTF-8', () => {
   const line = Buffer.from('%output %1 a\\033[1m\\134x caf\xc3\xa9\\015\\012', 'latin1');
@@ -439,4 +440,14 @@ test('remoteAction: pane commands of prefix bindings', () => {
   assert.equal(remoteAction('select-pane -L ; display-message hi'), null);
   assert.equal(remoteAction('new-window'), null);
   assert.equal(remoteAction(undefined), null);
+});
+
+test('reconnectDelay spreads tries at random and backs off to at most 30s', () => {
+  // rand 1 (never drawn) stands for the top of the range.
+  assert.equal(reconnectDelay(1, 0), 3000);
+  assert.equal(reconnectDelay(1, 1), 5000);
+  assert.equal(reconnectDelay(2, 0), 6000);
+  assert.equal(reconnectDelay(3, 0), 12000);
+  assert.equal(reconnectDelay(4, 0), 18000);
+  assert.equal(reconnectDelay(50, 1), 30000);
 });
