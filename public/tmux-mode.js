@@ -725,7 +725,11 @@ export function startTmuxMode({ container, toolbar, params }) {
   // A newly active tab scrolled out of sight (switched to from the keyboard)
   // slides into view, with a bit of its neighbour showing. Only when the
   // active tab changes, so scrolling the tab bar by hand is left alone.
+  // A tab you clicked is not moved: it is under the pointer, so in view, and
+  // sliding it there (one near the edge of a narrow window) made it jump.
   let shownActive = null;
+  let clickedTab = null; // { key, at }: the tab clicked last, for 10s
+  const clicked = (key) => clickedTab?.key === key && Date.now() - clickedTab.at < 10000;
   let shownKinds = null; // key -> kind at the last render
   function revealTab(el) {
     const bar = toolbar.tabs;
@@ -789,8 +793,8 @@ export function startTmuxMode({ container, toolbar, params }) {
     shownKinds = new Map(tabs.map((t) => [t.key, t.kind]));
     if (active !== shownActive) {
       shownActive = active;
-      if (active) revealTab(tabEls.get(active));
-    } else if (fresh) revealTab(tabEls.get(fresh));
+      if (active && !clicked(active)) revealTab(tabEls.get(active));
+    } else if (fresh && !clicked(fresh)) revealTab(tabEls.get(fresh));
     // A reopened window joins tmux's list last; move it to its tab's place.
     if (landed) syncTmuxOrder();
   }
@@ -907,6 +911,7 @@ export function startTmuxMode({ container, toolbar, params }) {
     b.addEventListener('click', () => {
       const t = tabItems.get(key);
       if (!t || !haveState) return;
+      clickedTab = { key, at: Date.now() };
       if (t.kind === 'live') {
         send({ t: 'select-window', w: t.w.id });
         panes.get(activePane)?.term.focus();
