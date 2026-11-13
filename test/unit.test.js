@@ -9,6 +9,7 @@ import { planSwaps } from '../server/tmux-session.js';
 import { parseRemote, remoteCommand } from '../server/remotes.js';
 import { remoteAction } from '../server/remote-keys.js';
 import { reconnectDelay } from '../server/remote-ssh.js';
+import { isLocalRequest } from '../server/app.js';
 
 test('decodeOutput turns octal escapes back into bytes and keeps raw UTF-8', () => {
   const line = Buffer.from('%output %1 a\\033[1m\\134x caf\xc3\xa9\\015\\012', 'latin1');
@@ -450,4 +451,28 @@ test('reconnectDelay spreads tries at random and backs off to at most 30s', () =
   assert.equal(reconnectDelay(3, 0), 12000);
   assert.equal(reconnectDelay(4, 0), 18000);
   assert.equal(reconnectDelay(50, 1), 30000);
+});
+
+test('isLocalRequest accepts only loopback sockets, local Host headers, and matching local Origins', () => {
+  const req = (remoteAddress, host, origin) => ({
+    socket: { remoteAddress },
+    headers: { ...(host !== undefined ? { host } : {}), ...(origin !== undefined ? { origin } : {}) },
+  });
+  // HTTP requests from this machine (browser or CLI health probe).
+  assert.equal(isLocalRequest(req('127.0.0.1', '127.0.0.1:7778')), true);
+  assert.equal(isLocalRequest(req('::1', 'localhost:7778', 'http://localhost:7778')), true);
+  assert.equal(isLocalRequest(req('::ffff:127.0.0.1', '[::1]:7778', 'http://[::1]:7778')), true);
+  // Non-loopback sockets are refused.
+  assert.equal(isLocalRequest(req('192.168.1.10', '127.0.0.1:7778', 'http://127.0.0.1:7778')), false);
+  assert.equal(isLocalRequest(req(undefined, '127.0.0.1:7778', 'http://127.0.0.1:7778')), false);
+  // DNS rebinding (Host + Origin both set to an external domain resolving to 127.0.0.1) is refused.
+  assert.equal(isLocalRequest(req('127.0.0.1', 'evil.example.com:7778', 'http://evil.example.com:7778')), false);
+  assert.equal(isLocalRequest(req('127.0.0.1', undefined)), false);
+  // WebSocket handshakes require a matching local Origin.
+  assert.equal(isLocalRequest(req('127.0.0.1', '127.0.0.1:7778', 'http://127.0.0.1:7778'), { requireOrigin: true }), true);
+  assert.equal(isLocalRequest(req('127.0.0.1', '127.0.0.1:7778'), { requireOrigin: true }), false);
+  assert.equal(isLocalRequest(req('127.0.0.1', '127.0.0.1:7778', 'null'), { requireOrigin: true }), false);
+  assert.equal(isLocalRequest(req('127.0.0.1', '127.0.0.1:7778', 'https://evil.example.com'), { requireOrigin: true }), false);
+  assert.equal(isLocalRequest(req('127.0.0.1', '127.0.0.1:7778', 'http://localhost:7778'), { requireOrigin: true }), false);
+  assert.equal(isLocalRequest(req('127.0.0.1', '127.0.0.1:7778', 'file://'), { requireOrigin: true }), false);
 });

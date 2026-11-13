@@ -27,6 +27,27 @@ export const HEALTH_PATH = '/dtmux/health';
 // Close code for a page whose session another page took (see tmux-mode.js).
 export const TAKEN_CODE = 4001;
 
+const LOCAL_HOST = /^(?:127\.0\.0\.1|localhost|\[::1\])(?::\d{1,5})?$/i;
+const isLoopback = (addr) => addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1';
+
+// Only connections from this machine, addressed to this machine (not a DNS
+// rebinding domain pointing at 127.0.0.1), and on WebSockets only from a page
+// served by this origin.
+export function isLocalRequest(req, { requireOrigin = false } = {}) {
+  const addr = req.socket?.remoteAddress;
+  if (!isLoopback(addr)) return false;
+  const host = req.headers?.host;
+  if (typeof host !== 'string' || !LOCAL_HOST.test(host)) return false;
+  const origin = req.headers?.origin;
+  if (origin === undefined) return !requireOrigin;
+  try {
+    const u = new URL(origin);
+    return (u.protocol === 'http:' || u.protocol === 'https:') && u.host.toLowerCase() === host.toLowerCase();
+  } catch {
+    return false;
+  }
+}
+
 // First seven hex digits of HEAD, plus "-dirty" when the worktree has
 // uncommitted changes. Read per page and per connection so a refresh shows
 // the repo as it is now.
@@ -92,6 +113,10 @@ function resolveStatic(pathname) {
 // for a full restart, `onSoftRestart` for a soft one (tmux keeps running).
 export function startServer({ port, onStop = () => {}, onRestart = () => {}, onSoftRestart = () => {} }) {
   const server = http.createServer((req, res) => {
+    if (!isLocalRequest(req)) {
+      res.writeHead(403).end('forbidden');
+      return;
+    }
     const pathname = new URL(req.url, `http://${req.headers.host}`).pathname;
     if (pathname === HEALTH_PATH) {
       // The CLI uses this to tell a running dtmux from anything else on the port.
@@ -125,13 +150,16 @@ export function startServer({ port, onStop = () => {}, onRestart = () => {}, onS
       res.end(data);
     });
   });
+  server.on('connection', (socket) => {
+    if (!isLoopback(socket.remoteAddress)) socket.destroy();
+  });
 
   const wss = new WebSocketServer({ server, path: '/ws' });
   const owners = new Map(); // session -> the page's socket that has it
   wss.on('connection', (ws, req) => {
-    // Same-origin only: refuse handshakes coming from other sites.
-    const origin = req.headers.origin;
-    if (origin && new URL(origin).host !== req.headers.host) {
+    // Local, same-origin only: refuse non-loopback sockets, DNS-rebound Host
+    // headers, missing/null Origins, and handshakes coming from other sites.
+    if (!isLocalRequest(req, { requireOrigin: true })) {
       ws.close(1008, 'bad origin');
       return;
     }
