@@ -147,6 +147,20 @@ remotes:
   through a tmux format subscription on the window option
   `@dtmux_remote_state`. A custom `attach:` leaves no marker, so it never
   deletes on its own.
+- **Agents survive a killed tmux.** Every minute while a remote tab is
+  connected, its helper writes down the coding agents running in the
+  machine's tmux (Claude Code, Codex, the Cursor agent) as a script on the
+  machine, `~/.dtmux/restore.sh`: each agent's directory and the command
+  that resumes it with the same flags. Claude Code is resumed by its exact
+  session, read from `~/.claude/sessions/<pid>.json`. When the tab finds the
+  tmux gone (out of memory, `tmux kill-server`, a restart), it shows what ran
+  there, with any `oom` lines from the user journal since, and offers a new
+  tmux with them resumed (Enter), a new empty one (`n`), or the usual choices
+  (Ctrl+C). The script is moved aside first (`~/.dtmux/lost-<time>.sh`), so
+  `sh ~/.dtmux/lost-<time>.sh run` still resumes them later. A plain `ssh`
+  login gets the same report from a line dtmux adds to `~/.bashrc`, while no
+  tmux runs there: `sh ~/.dtmux/restore.sh run && tmux attach -t dtmux`.
+  Only with the default `attach:` (`server/remote-agents.js`).
 - **Every delete is logged.** Whatever deletes a machine (the page, a tab,
   the sweep) writes a line to `~/.dtmux/dtmux.log` first, saying why, and
   another once it is done.
@@ -354,6 +368,7 @@ Environment overrides, mostly for testing: `DTMUX_CONFIG`, `DTMUX_STATE_DIR`,
 | `server/pty-session.js`    | plain-shell mode                                     |
 | `server/remote-ssh.js`     | ssh into a remote tab's machine (helper and daemon)  |
 | `server/remote-keys.js`    | pane commands of a remote tab act on the machine     |
+| `server/remote-agents.js`  | a remote tab's agents, written down to resume later  |
 | `server/gh-check.js`       | the clean container that checks a GitHub token       |
 | `server/gh-remote.js`      | gh on a remote machine: status, instrument, undo     |
 | `server/settings.js`       | Settings: connectors read and saved, comments kept   |
