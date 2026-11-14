@@ -25,11 +25,16 @@ import { kindOf, MUX_DIR, transient, deleteMachine } from '../server/remote-kind
 import { recordMachine, dropMachine } from '../server/machine-ledger.js';
 import { TMUX_BIN } from '../server/tmux-control.js';
 import { sshArgs, KNOWN_HOSTS, reconnectDelay } from '../server/remote-ssh.js';
-import { ENDED_MARKER } from '../server/remote-config.js';
+import { ENDED_MARKER, DEFAULT_ATTACH } from '../server/remote-config.js';
+import { shellQuote } from '../server/agent-resume.js';
+import { GATHER, parseGather, agentsFrom, restoreScript, writeCommand, TAKE_LOST, parseLost } from '../server/remote-agents.js';
 
 const [name, firstHost, ...flags] = process.argv.slice(2);
 const flag = (f) => (flags.includes(f) ? flags[flags.indexOf(f) + 1] ?? null : null);
 const KEEPALIVE_MS = 30 * 60000;
+// How often the agents in the machine's tmux are written down there (see
+// server/remote-agents.js): a kill loses at most this much of who ran.
+const SNAPSHOT_MS = 60000;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const say = (text, color = '36') => process.stdout.write(`\x1b[${color}m▸ ${text}\x1b[0m\r\n`);
 const warn = (text) => say(text, '33');
@@ -182,6 +187,19 @@ async function connect(address, fresh, { probe = false } = {}) {
       const since = await remoteTmuxStart(base);
       let code = 255;
       if (since !== null) {
+        // No tmux there, and agents were written down as running in it: it was
+        // killed under them. Offered back before a new, empty one starts.
+        const lost = since === 0 && remote.attach === DEFAULT_ATTACH ? await takeLost(base) : null;
+        if (lost) {
+          const next = await offerLost(base, lost);
+          if (next === 'menu') {
+            const after = await ended(`The agents on ${remote.label} ${kind.noun} ${host} were not resumed (${lost.file} keeps them)`);
+            if (after !== 'reconnect') return;
+            tries = 0;
+            continue;
+          }
+          expectNew = true; // asked already
+        }
         if (since === 0 ? !expectNew : tmuxSince !== null && since !== tmuxSince) {
           shellsEnded(since, tmuxSince);
           if (!(await ask(`Press Enter to ${since ? 'join the tmux there now' : 'start a new tmux there'}, Ctrl+C for other choices.`))) {
@@ -196,6 +214,7 @@ async function connect(address, fresh, { probe = false } = {}) {
         if (since) tmuxSince = since;
         // Once ssh is in (and its shared connection up), not alongside it.
         const first = kind.keepAlive ? setTimeout(touch, 10000) : null;
+        const snapping = remote.attach === DEFAULT_ATTACH ? snapshotEvery(base) : null;
         // A tmux this join started: note when, to know it again next time.
         const learn = tmuxSince
           ? null
@@ -211,6 +230,7 @@ async function connect(address, fresh, { probe = false } = {}) {
         process.off('SIGINT', keep);
         clearTimeout(first);
         clearTimeout(learn);
+        snapping?.stop();
       }
       if (code !== 255) {
         // ssh came back on its own: the machine's tmux ended or was only
@@ -346,6 +366,83 @@ function remoteTmuxStart(base) {
   });
 }
 
+// Write down the agents in the machine's tmux now and then while attached
+// (first once ssh is surely in): { stop }. A tmux that is not there (it was
+// just killed) leaves what was written last alone.
+function snapshotEvery(base) {
+  let busy = false;
+  const once = async () => {
+    if (busy) return;
+    busy = true;
+    try {
+      const out = await sshOut(base, `bash -c ${shellQuote(GATHER)}`);
+      const seen = out === null ? null : parseGather(out);
+      if (!seen || seen.notmux || seen.at === null) return;
+      const agents = agentsFrom(seen);
+      await sshOut(base, writeCommand(agents.length > 0), restoreScript(agents, seen.at));
+    } finally {
+      busy = false;
+    }
+  };
+  const first = setTimeout(once, 15000);
+  const every = setInterval(once, SNAPSHOT_MS);
+  return {
+    stop() {
+      clearTimeout(first);
+      clearInterval(every);
+    },
+  };
+}
+
+// The agents written down as running in a tmux that is no longer there,
+// moved aside so the next snapshot does not replace them: { file, count,
+// report }, or null.
+async function takeLost(base) {
+  const out = await sshOut(base, TAKE_LOST);
+  return out === null ? null : parseLost(out);
+}
+
+// Show what ran there and offer it back: 'resumed', 'empty' (a new tmux
+// without them), or 'menu' (Ctrl+C: reconnect or delete).
+async function offerLost(base, lost) {
+  const what = `${remote.label} ${kind.noun} ${host}`;
+  const red = (text) => say(text, '1;31');
+  red(`There is no tmux on ${what} any more: it was killed (out of memory, tmux kill-server) or the machine restarted.`);
+  for (const line of lost.report.split('\n')) say(line, '33');
+  const n = lost.count === 1 ? 'it' : `these ${lost.count}`;
+  const key = await askKey(`Enter: a new tmux with ${n} resumed · n: a new, empty tmux · Ctrl+C: other choices`, ['\r', '\n', 'n', 'N', '\x03']);
+  if (key === null || key === '\x03') return 'menu';
+  if (key === 'n' || key === 'N') {
+    say(`Starting it empty; ${lost.file} still resumes them: sh ${lost.file} run`);
+    return 'empty';
+  }
+  const out = await sshOut(base, `sh ${lost.file} run 2>&1`);
+  if (out === null) warn(`Could not resume them; on the ${kind.noun}: sh ${lost.file} run`);
+  else for (const line of out.trimEnd().split('\n')) say(line);
+  return 'resumed';
+}
+
+// Run `command` on the machine over the shared connection, `stdin` fed to it:
+// its stdout, or null when ssh could not get through (or it took too long).
+function sshOut(base, command, stdin = '') {
+  return new Promise((resolve) => {
+    let out = '';
+    const child = spawn('ssh', ['-o', 'BatchMode=yes', ...base, command], { stdio: ['pipe', 'pipe', 'ignore'] });
+    const timer = setTimeout(() => child.kill('SIGKILL'), 30000);
+    child.stdout.on('data', (d) => (out += d));
+    child.stdin.on('error', () => {});
+    child.stdin.end(stdin);
+    child.on('error', () => {
+      clearTimeout(timer);
+      resolve(null);
+    });
+    child.on('close', (code, signal) => {
+      clearTimeout(timer);
+      resolve(code === 255 || signal ? null : out);
+    });
+  });
+}
+
 // The tmux on the machine is gone (`since` 0) or another one runs there
 // (started at `since`; the one before at `before`): what ran in it ended.
 function shellsEnded(since, before) {
@@ -355,7 +452,7 @@ function shellsEnded(since, before) {
   if (since) red(`The tmux on ${what} started again at ${at(since)} (the one before ran since ${at(before)}).`);
   else red(`There is no tmux on ${what} any more.`);
   red('The shells and coding agents that ran there have ended: the machine restarted or ran out of memory, or its tmux was killed.');
-  red('An agent can be picked up again from its directory there: claude --resume, codex resume.');
+  red('An agent can be picked up again from its directory there: claude --resume, codex resume (and see ~/.dtmux/lost-*.sh there).');
 }
 
 // Sleep, cut short by Ctrl+C: resolves true when it was.
