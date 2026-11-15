@@ -5,6 +5,21 @@
 
 const MAX_PASTE_BYTES = 12 * 1024 * 1024;
 
+// How long a pasted image sits on the tab, then how long it takes to fade.
+export const PASTE_FLASH_HOLD_MS = 500;
+export const PASTE_FLASH_FADE_MS = 250;
+
+// Two timers: `onFade` after the hold, `onDone` once the fade has finished.
+// The returned function cancels both, so a second paste can replace the first.
+export function armPasteFlash({ holdMs, fadeMs, onFade, onDone, schedule = setTimeout, cancel = clearTimeout }) {
+  const fade = schedule(onFade, holdMs);
+  const done = schedule(onDone, holdMs + fadeMs);
+  return () => {
+    cancel(fade);
+    cancel(done);
+  };
+}
+
 // The image in a paste event. A path or any other real text stays a text
 // paste. A screenshot is an image and, in some browsers, also the bare name
 // "image.png", which is not a file the program can read.
@@ -104,4 +119,36 @@ export function attachImagePaste(root, onFile) {
 export async function fileToMessage(file) {
   const bytes = new Uint8Array(await file.arrayBuffer());
   return imageMessage(bytes);
+}
+
+// Show `file` over `host` (the active tab), hold it, then fade it out.
+// A paste that arrives while one is showing replaces it.
+export function flashPastedImage(host, file) {
+  if (!host || typeof document === 'undefined') return;
+  host.querySelector(':scope > .paste-flash')?._stop?.();
+  const url = URL.createObjectURL(file);
+  const el = document.createElement('div');
+  el.className = 'paste-flash';
+  const img = document.createElement('img');
+  img.alt = '';
+  img.src = url;
+  el.append(img);
+  const drop = () => {
+    el.remove();
+    URL.revokeObjectURL(url);
+  };
+  const stop = armPasteFlash({
+    holdMs: PASTE_FLASH_HOLD_MS,
+    fadeMs: PASTE_FLASH_FADE_MS,
+    onFade: () => {
+      el.style.transitionDuration = `${PASTE_FLASH_FADE_MS}ms`;
+      el.classList.add('out');
+    },
+    onDone: drop,
+  });
+  el._stop = () => {
+    stop();
+    drop();
+  };
+  host.append(el);
 }

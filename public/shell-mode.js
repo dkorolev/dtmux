@@ -2,7 +2,7 @@
 import { FitAddon } from '/vendor/addon-fit.mjs';
 import { WebglAddon } from '/vendor/addon-webgl.mjs';
 import { createTerminal, socketUrl } from './terminal-common.js';
-import { attachImagePaste, fileToMessage } from './paste-image.js';
+import { attachImagePaste, fileToMessage, flashPastedImage } from './paste-image.js';
 
 export function startShellMode({ container, toolbar, params }) {
   let ws = null;
@@ -16,6 +16,7 @@ export function startShellMode({ container, toolbar, params }) {
   term.loadAddon(fit);
   term.open(container);
   attachImagePaste(container, async (file) => {
+    flashPastedImage(container, file);
     const msg = await fileToMessage(file).catch(() => null);
     if (msg) send(msg);
   });

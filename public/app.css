@@ -470,6 +470,32 @@ body {
 .tmux-notice.bad {
   border-color: var(--bad);
 }
+/* A pasted image, held on the tab and then faded. pointer-events stay off
+   so the terminal keeps the keystrokes that follow the paste. */
+.paste-flash {
+  position: absolute;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.55);
+  pointer-events: none;
+  opacity: 1;
+}
+.paste-flash img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: 8px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55);
+}
+.paste-flash.out {
+  opacity: 0;
+  transition: opacity linear;
+}
 .tmux-journal {
   position: absolute;
   left: 50%;

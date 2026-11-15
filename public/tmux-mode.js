@@ -8,7 +8,7 @@
 // tmux prefix key is the exception: prefix sequences go through tmux's own
 // key bindings, so splits, new windows and the rest keep working.
 import { createTerminal, leaveQueriesToTmux, base64ToBytes, socketUrl, DEFAULT_TEXT_SIZE, TEXT_SIZE_MIN, TEXT_SIZE_MAX, textSize, saveTextSize } from './terminal-common.js';
-import { attachImagePaste, fileToMessage } from './paste-image.js';
+import { attachImagePaste, fileToMessage, flashPastedImage } from './paste-image.js';
 import { makePanels } from './panels.js';
 import { followTmuxOrder, orderTabs, parseLayout, paneBorders, tmuxKeyName, windowSwitchDirection } from './tmux-util.js';
 
@@ -64,6 +64,8 @@ export function startTmuxMode({ container, toolbar, params }) {
   const openExternal = (url) => send({ t: 'open', url });
 
   async function sendPastedImage(paneId, file) {
+    const host = panes.get(paneId)?.el.parentElement;
+    if (host) flashPastedImage(host, file);
     let msg;
     try {
       msg = await fileToMessage(file);
