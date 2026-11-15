@@ -10,6 +10,7 @@ import { parseRemote, remoteCommand } from '../server/remotes.js';
 import { remoteAction } from '../server/remote-keys.js';
 import { reconnectDelay } from '../server/remote-ssh.js';
 import { isLocalRequest } from '../server/app.js';
+import { runtimeWhy } from '../server/gh-check.js';
 
 test('decodeOutput turns octal escapes back into bytes and keeps raw UTF-8', () => {
   const line = Buffer.from('%output %1 a\\033[1m\\134x caf\xc3\xa9\\015\\012', 'latin1');
@@ -475,4 +476,13 @@ test('isLocalRequest accepts only loopback sockets, local Host headers, and matc
   assert.equal(isLocalRequest(req('127.0.0.1', '127.0.0.1:7778', 'https://evil.example.com'), { requireOrigin: true }), false);
   assert.equal(isLocalRequest(req('127.0.0.1', '127.0.0.1:7778', 'http://localhost:7778'), { requireOrigin: true }), false);
   assert.equal(isLocalRequest(req('127.0.0.1', '127.0.0.1:7778', 'file://'), { requireOrigin: true }), false);
+});
+
+test('a container runtime that is missing or idle is said in one short phrase', () => {
+  assert.equal(runtimeWhy(127, '', ''), 'not installed');
+  assert.equal(
+    runtimeWhy(1, 'Error: unable to connect to Podman socket: failed to read identity "/Users/dima/.local/share/containers/podman/machine/machine"', ''),
+    'not running',
+  );
+  assert.equal(runtimeWhy(1, '', ''), 'exit 1');
 });

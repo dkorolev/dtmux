@@ -1190,11 +1190,19 @@ export function startTmuxMode({ container, toolbar, params }) {
   }
 
   // Right-click on `el`, or a long press on a touch screen, runs `open`.
-  function onMenuGesture(el, open) {
+  // `click`: a plain left click does too (the dtmux label has no other click).
+  function onMenuGesture(el, open, { click = false } = {}) {
     el.addEventListener('contextmenu', (e) => {
       e.preventDefault();
       open();
     });
+    if (click) {
+      el.addEventListener('click', (e) => {
+        if (e.button !== 0 || e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return;
+        e.preventDefault();
+        open();
+      });
+    }
     let pressTimer = null;
     el.addEventListener('pointerdown', (e) => {
       if (e.pointerType === 'mouse') return;
@@ -1244,6 +1252,9 @@ export function startTmuxMode({ container, toolbar, params }) {
       b.title = title;
       if (color) b.style.color = color;
       if (!b.hasAttribute('role')) b.setAttribute('role', 'menuitem');
+      // The lit row follows the pointer, so a focused row and a hovered
+      // row are never two different rows.
+      b.addEventListener('pointerenter', () => b.focus());
       b.addEventListener('click', () => {
         closeTabMenu();
         run();
@@ -1280,7 +1291,7 @@ export function startTmuxMode({ container, toolbar, params }) {
         window.removeEventListener('resize', closeTabMenu);
       },
     };
-    menu.querySelector('button').focus();
+    if (!menu.contains(document.activeElement)) menu.querySelector('button')?.focus();
   }
   function closeTabMenu() {
     if (!tabMenu) return;
@@ -1584,15 +1595,15 @@ export function startTmuxMode({ container, toolbar, params }) {
     ],
   ];
 
-  // Right-click on the dtmux label (or a long press): how selecting works,
-  // the text size, and the restarts.
+  // A click or a right-click on the dtmux label (or a long press): how
+  // selecting works, the text size, and the restarts.
   const statusEl = document.getElementById('status');
   function showStatusMenu() {
     const r = statusEl.getBoundingClientRect();
-    const settingsItem = ['Settings…', 'The gh check container, and the connectors (remotes) with their colors', () => panels.showSettings()];
+    const settingsItem = ['Settings…', 'gh, the container runtimes, and the connectors', () => panels.showSettings()];
     showMenu([...selectItems(), null, textSizeRow(), null, settingsItem, ...(canRestart ? [null, ...restartItems()] : [])], r.right, r.bottom + 4);
   }
-  onMenuGesture(statusEl, showStatusMenu);
+  onMenuGesture(statusEl, showStatusMenu, { click: true });
   // The press, the movement and the release of a drag all go with Option,
   // or the program still gets the motion (and the selection is cut short).
   // Plain hover motion over a terminal too: programs get no mouse at all.

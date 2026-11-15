@@ -30,13 +30,13 @@ keys and YAML syntax errors all stop `dtmux` with every problem listed (exit
 code 2). If you change the port while dtmux runs, `dtmux` tells you so;
 `dtmux kill && dtmux` moves it.
 
-**Settings** (right-click the blue `dtmux` › Settings…) edits the
+**Settings** (click or right-click the blue `dtmux` › Settings…) edits the
 connectors, the `remotes:` below, field by field: colors (with a picker),
 labels and the rest, an empty field meaning the default. Save checks the
 whole file first and refuses an invalid one, saying why; it writes the
 file in place, comments kept (aligned trailing comments lose their
-alignment). Tabs take a new color or label at once. Settings also shows the
-gh check container (see below), with Rebuild.
+alignment). Tabs take a new color or label at once. Settings also shows
+gh (the check image, with Rebuild) and which container runtime is in use.
 
 ## Remote sessions
 
@@ -193,7 +193,7 @@ remotes:
   `@dtmux_id`; for a window of several panes, every pane: its directory,
   git branch and coding agent, and the window's layout), then closes the browser connections, runs
   `tmux -L dtmux kill-server` (the shells in its panes get SIGHUP), removes the
-  pid file and exits. Hard restart (right-click the blue `dtmux` at the top
+  pid file and exits. Hard restart (click or right-click the blue `dtmux` at the top
   right) does that and then starts a new
   daemon on the same port, running the code as it is on disk; open pages
   reconnect by themselves.
@@ -266,7 +266,7 @@ disagreeing about it.
 
 ## Text selection
 
-Right-click the blue `dtmux` at the top right (or long-press it) to choose
+Click or right-click the blue `dtmux` at the top right (or long-press it) to choose
 how a drag in a terminal works; the same menu has the soft and hard restarts.
 **Mouse integration**: programs that ask for the mouse (tmux, vim, coding
 agents) get the clicks and drags. **Mouse selection**: the page selects the

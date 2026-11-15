@@ -77,10 +77,21 @@ async function findRuntime() {
   for (const [label, cmd, probe] of RUNTIMES) {
     const r = await run(cmd, probe, { timeoutMs: 15000 });
     const ok = r.code === 0;
-    seen.push({ label, cmd, ok, why: ok ? null : r.code === 127 ? 'not installed' : (r.err || r.out).trim().split('\n').pop()?.slice(0, 200) || `exit ${r.code}` });
+    seen.push({ label, cmd, ok, why: ok ? null : runtimeWhy(r.code, r.err, r.out) });
     if (ok && !chosen) chosen = { label, cmd };
   }
   return { chosen, seen };
+}
+
+// What Settings shows when a runtime did not answer. A socket path is not a
+// reason: the runtime is missing, or it is not running.
+export function runtimeWhy(code, err, out) {
+  if (code === 127) return 'not installed';
+  const text = `${err || ''}\n${out || ''}`;
+  if (/unable to connect|cannot connect|connection refused|no such file|socket|not running|machine/i.test(text)) return 'not running';
+  const sentence = (text.trim().split('\n').find(Boolean) || '').split(/[.:]/)[0].replace(/\s+/g, ' ').trim();
+  if (!sentence) return `exit ${code}`;
+  return sentence.length > 48 ? `${sentence.slice(0, 45)}…` : sentence;
 }
 
 const imageExists = async (cmd) => (await run(cmd, ['image', 'inspect', IMAGE], { timeoutMs: 15000 })).code === 0;
