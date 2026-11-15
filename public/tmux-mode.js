@@ -8,6 +8,7 @@
 // tmux prefix key is the exception: prefix sequences go through tmux's own
 // key bindings, so splits, new windows and the rest keep working.
 import { createTerminal, leaveQueriesToTmux, base64ToBytes, socketUrl, DEFAULT_TEXT_SIZE, TEXT_SIZE_MIN, TEXT_SIZE_MAX, textSize, saveTextSize } from './terminal-common.js';
+import { attachImagePaste, fileToMessage } from './paste-image.js';
 import { makePanels } from './panels.js';
 import { followTmuxOrder, orderTabs, parseLayout, paneBorders, tmuxKeyName, windowSwitchDirection } from './tmux-util.js';
 
@@ -62,6 +63,21 @@ export function startTmuxMode({ container, toolbar, params }) {
   };
   const openExternal = (url) => send({ t: 'open', url });
 
+  async function sendPastedImage(paneId, file) {
+    let msg;
+    try {
+      msg = await fileToMessage(file);
+    } catch (err) {
+      showNotice(err.message || 'Could not read that image.', 'bad', paneId);
+      return;
+    }
+    if (!msg) {
+      showNotice('That image is too large to paste.', 'bad', paneId);
+      return;
+    }
+    send({ ...msg, p: paneId });
+  }
+
   function connect() {
     ended = false;
     const query = { cols: grid.cols, rows: grid.rows };
@@ -114,6 +130,10 @@ export function startTmuxMode({ container, toolbar, params }) {
           break;
         case 'out':
           panes.get(msg.p)?.term.write(base64ToBytes(msg.d));
+          break;
+        case 'paste-path':
+          if (msg.error) showNotice(msg.error, 'bad', msg.p);
+          else if (msg.path) panes.get(msg.p)?.term.paste(msg.path);
           break;
         case 'prompt':
           showPrompt(msg);
@@ -589,6 +609,7 @@ export function startTmuxMode({ container, toolbar, params }) {
     const term = createTerminal({ cols: info.width, rows: info.height, openExternal, keyHandler });
     leaveQueriesToTmux(term);
     term.open(el);
+    attachImagePaste(el, (file) => sendPastedImage(info.id, file));
     term.onData((d) => send({ t: 'in', p: info.id, d }));
     term.onBinary((d) => send({ t: 'in', p: info.id, d, bin: true }));
     // Clicking a pane makes it tmux's active pane too.
