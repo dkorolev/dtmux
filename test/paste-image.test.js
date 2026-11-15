@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { imageKind, savePastedImage } from '../server/paste-image.js';
-import { fileFromPasteEvent, imageMessage } from '../public/paste-image.js';
+import { armPasteFlash, fileFromPasteEvent, imageMessage, PASTE_FLASH_FADE_MS, PASTE_FLASH_HOLD_MS } from '../public/paste-image.js';
 
 const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]);
 
@@ -44,6 +44,29 @@ test('a paste with text is left alone, an image file is taken', () => {
     null,
   );
   assert.equal(fileFromPasteEvent(null), null);
+});
+
+test('a pasted image is held for half a second, then fades over a quarter', () => {
+  assert.equal(PASTE_FLASH_HOLD_MS, 500);
+  assert.equal(PASTE_FLASH_FADE_MS, 250);
+  const handles = [];
+  const stop = armPasteFlash({
+    holdMs: PASTE_FLASH_HOLD_MS,
+    fadeMs: PASTE_FLASH_FADE_MS,
+    onFade: () => {},
+    onDone: () => {},
+    schedule: (_fn, ms) => {
+      handles.push({ ms });
+      return handles.length;
+    },
+    cancel: (id) => handles.push({ canceled: id }),
+  });
+  assert.deepEqual(
+    handles.map((h) => h.ms),
+    [500, 750],
+  );
+  stop();
+  assert.deepEqual(handles.slice(2), [{ canceled: 1 }, { canceled: 2 }]);
 });
 
 test('imageMessage refuses an empty or oversized image', () => {
