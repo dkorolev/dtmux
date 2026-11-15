@@ -2,6 +2,7 @@
 import { FitAddon } from '/vendor/addon-fit.mjs';
 import { WebglAddon } from '/vendor/addon-webgl.mjs';
 import { createTerminal, socketUrl } from './terminal-common.js';
+import { attachImagePaste, fileToMessage } from './paste-image.js';
 
 export function startShellMode({ container, toolbar, params }) {
   let ws = null;
@@ -14,6 +15,10 @@ export function startShellMode({ container, toolbar, params }) {
   const fit = new FitAddon();
   term.loadAddon(fit);
   term.open(container);
+  attachImagePaste(container, async (file) => {
+    const msg = await fileToMessage(file).catch(() => null);
+    if (msg) send(msg);
+  });
 
   // ?renderer=dom forces the DOM renderer (for debugging rendering issues).
   let renderer = 'dom';
@@ -49,6 +54,7 @@ export function startShellMode({ container, toolbar, params }) {
     ws.onmessage = (ev) => {
       const msg = JSON.parse(ev.data);
       if (msg.t === 'out') term.write(msg.d);
+      else if (msg.t === 'paste-path' && msg.path) term.paste(msg.path);
       else if (msg.t === 'exit') {
         toolbar.setStatus(`shell exited (${msg.code})`, 'bad');
         term.write(`\r\n\x1b[90m[process exited with code ${msg.code}]\x1b[0m\r\n`);

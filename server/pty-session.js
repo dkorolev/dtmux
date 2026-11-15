@@ -2,6 +2,7 @@
 import os from 'node:os';
 import pty from 'node-pty';
 import { openExternal } from './open-external.js';
+import { savePastedImage, pasteDir } from './paste-image.js';
 
 const SHELL = process.env.SHELL || (process.platform === 'win32' ? 'powershell.exe' : 'bash');
 
@@ -53,6 +54,15 @@ export function attachShellSession(ws, { cols, rows }) {
         break;
       case 'open':
         openExternal(msg.url);
+        break;
+      case 'paste-image':
+        if (typeof msg.data !== 'string' || msg.data.length === 0 || msg.data.length > 16_000_000) break;
+        try {
+          const path = savePastedImage(Buffer.from(msg.data, 'base64'), pasteDir());
+          ws.send(JSON.stringify({ t: 'paste-path', path }));
+        } catch {
+          // Not an image: the shell keeps its text paste.
+        }
         break;
     }
   });

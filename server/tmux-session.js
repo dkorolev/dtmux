@@ -12,6 +12,7 @@
 //                                         a remote machine (ended: its session ended, the tab waits)
 //   init   { p, d }                       a pane's history and modes, base64
 //   out    { p, d }                       pane output, base64
+//   paste-path { p, path } | { p, error } where a pasted image was saved
 //   exit   { reason, sessionGone }        tmux detached or the session ended
 //   prompt { id, kind, prompts, inputs, single, numeric, confirmKey, enterConfirms }
 //                                         a binding wants an answer (see tmux-bindings.js)
@@ -28,6 +29,7 @@
 //                                         the page sends resume or new-session
 // Messages from the browser:
 //   in     { p, d, bin? }   bytes for a pane (xterm.js onData / onBinary)
+//   paste-image { p, data }  a screenshot, base64; answered with paste-path
 //   size   { cols, rows }   the browser's grid size for the whole session
 //   keys   { keys }         tmux key names routed through tmux key bindings
 //   answer { id, values }   the reply to a prompt; values null when cancelled
@@ -69,6 +71,7 @@ import { events as containerEvents, containerStatus, ensureImage } from './gh-ch
 import { hostStatus, cleanCheck, machineStatus, instrument, uninstrument } from './gh-remote.js';
 import { readConnectors, saveConnectors } from './settings.js';
 import { kindOf, deleteMachine } from './remote-kinds.js';
+import { savePastedImage, uploadPaste, pasteDir } from './paste-image.js';
 import { dropMachine } from './machine-ledger.js';
 
 const HISTORY_LINES = 10000; // keep in sync with the browser's scrollback
@@ -279,6 +282,7 @@ function bridge(ws, opts) {
       fillWindow(first, firstPlan, win, pane);
     });
   const panes = new Map(); // pane id -> { ready }
+  let view = { windows: [], panes: [] }; // the last list-windows / list-panes, for a paste's machine
   const tails = new Map(); // pane id -> recent plain text, for resume hints
   const journaled = new Set(); // resume commands already shown this connection
   let clientName = null;
@@ -513,6 +517,7 @@ function bridge(ws, opts) {
         const [id, window, active, width, height, cmd] = l.split('\t');
         return { id, window, active: active === '1', width: Number(width), height: Number(height), cmd };
       });
+      view = { windows, panes: list };
       send({ t: 'state', windows, panes: list });
       const live = new Set(list.map((x) => x.id));
       for (const id of panes.keys()) {
@@ -579,6 +584,9 @@ function bridge(ws, opts) {
         if (isPaneId(msg.p) && panes.has(msg.p) && typeof msg.d === 'string') {
           sendBytes(msg.p, Buffer.from(msg.d, msg.bin ? 'latin1' : 'utf8'));
         }
+        break;
+      case 'paste-image':
+        if (isPaneId(msg.p) && panes.has(msg.p)) placePastedImage(msg);
         break;
       case 'size': {
         const c = Math.trunc(msg.cols);
@@ -930,6 +938,48 @@ function bridge(ws, opts) {
       const cwd = err ? '' : lines[0];
       send({ t: 'journal', p: paneId, agent: hint.agent, command: hint.command, ...placeOf(cwd) });
     });
+  }
+
+  // A screenshot from the page: keep it on this Mac, and on the machine too
+  // when the pane's shell is there, then tell the page the path to type.
+  function placePastedImage(msg) {
+    const fail = (error) => send({ t: 'paste-path', p: msg.p, error });
+    if (typeof msg.data !== 'string' || msg.data.length === 0 || msg.data.length > 16_000_000) {
+      fail('That image is too large to paste.');
+      return;
+    }
+    let local;
+    try {
+      local = savePastedImage(Buffer.from(msg.data, 'base64'), pasteDir());
+    } catch (e) {
+      fail(e.message);
+      return;
+    }
+    const pane = view.panes.find((p) => p.id === msg.p);
+    const where = view.windows.find((w) => w.id === pane?.window)?.remote;
+    if (!where) {
+      send({ t: 'paste-path', p: msg.p, path: local });
+      return;
+    }
+    if (where.ended || !where.address) {
+      fail('That machine is not connected, so the image was not pasted.');
+      return;
+    }
+    let remote;
+    try {
+      remote = currentRemotes()[where.name];
+    } catch (e) {
+      fail(e.message);
+      return;
+    }
+    if (!remote) {
+      fail(`No remote "${where.name}" in ~/.dtmux.yaml, so the image was not pasted.`);
+      return;
+    }
+    uploadPaste(remote, where.host, where.address, local).then(
+      (path) => send({ t: 'paste-path', p: msg.p, path }),
+      (e) => fail(e.message),
+    );
   }
 
   // Raw bytes into a pane, bypassing tmux's key handling. xterm.js has already
