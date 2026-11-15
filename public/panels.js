@@ -40,6 +40,19 @@ export function makePanels({ send, focus }) {
     if (text !== undefined) e.textContent = text;
     return e;
   };
+  // A chamfered action. The label is a span so it paints above the edge.
+  const chamferButton = (cls, text) => {
+    const b = el('button', cls ? `act ${cls}` : 'act');
+    b.append(el('span', '', text));
+    return b;
+  };
+  // The field's edge is this shell, not a border on the control. A border
+  // clipped to a chamfer loses its corner strokes.
+  const fieldShell = (control) => {
+    const shell = el('div', 'field');
+    shell.append(control);
+    return shell;
+  };
   const containerLine = (c) => {
     if (!c) return 'looking for a container runtime…';
     if (c.state === 'building') return `building the check image with ${c.runtime}…`;
@@ -230,24 +243,21 @@ export function makePanels({ send, focus }) {
     focus();
   }
 
-  function renderContainer(box) {
+  // A runtime's failure, one short phrase. The page may still be talking to a
+  // daemon that sent the old long socket error.
+  function shortWhy(why) {
+    if (!why) return 'unavailable';
+    if (why === 'not installed' || why === 'not running') return why;
+    if (/unable to connect|cannot connect|connection refused|no such file|socket|not running|machine/i.test(why)) return 'not running';
+    const sentence = why.split(/[.:\n]/)[0].trim();
+    return sentence.length > 48 ? `${sentence.slice(0, 45)}…` : sentence;
+  }
+
+  function renderGhSection(box) {
     box.replaceChildren();
     const c = container;
-    box.append(el('h3', '', 'gh check container'));
-    box.append(
-      el(
-        'p',
-        'muted',
-        'gh… on a remote tab checks your GitHub token in a clean container before handing it to the machine. Runtimes, first one that works: Apple container, podman, docker.',
-      ),
-    );
-    const list = el('ul', 'runtimes');
-    for (const r of c?.runtimes ?? []) {
-      const li = el('li', r.ok ? 'ok' : 'bad', `${r.ok ? '✓' : '✗'} ${r.label}${r.label === c.runtime ? '  ← used' : ''}${r.ok ? '' : ` — ${r.why}`}`);
-      list.append(li);
-    }
-    if (!c?.runtimes?.length) list.append(el('li', 'muted', 'looking…'));
-    box.append(list);
+    box.append(el('h3', '', 'gh'));
+    box.append(el('p', 'muted', "Before a remote tab's gh is given this Mac's token, the token is checked in a clean container."));
     const state = el('p', `state ${c?.state ?? ''}`, `${c?.state === 'building' ? SPIN[Math.floor(Date.now() / 100) % SPIN.length] + ' ' : ''}${containerLine(c)}`);
     box.append(state);
     if (c?.log?.length && (c.state === 'building' || c.state === 'failed' || settings.showLog)) {
@@ -256,7 +266,7 @@ export function makePanels({ send, focus }) {
       requestAnimationFrame(() => (pre.scrollTop = pre.scrollHeight));
     }
     const row = el('div', 'row');
-    const rebuild = el('button', '', c?.state === 'building' ? 'Building…' : 'Rebuild');
+    const rebuild = chamferButton('', c?.state === 'building' ? 'Building…' : 'Rebuild');
     rebuild.disabled = c?.state === 'building' || c?.state === 'no-runtime';
     rebuild.addEventListener('click', () => {
       settings.showLog = true;
@@ -264,7 +274,7 @@ export function makePanels({ send, focus }) {
     });
     row.append(rebuild);
     if (c?.log?.length && c.state !== 'building') {
-      const log = el('button', '', settings.showLog ? 'Hide log' : 'Show log');
+      const log = chamferButton('', settings.showLog ? 'Hide log' : 'Show log');
       log.addEventListener('click', () => {
         settings.showLog = !settings.showLog;
         renderSettings();
@@ -272,6 +282,21 @@ export function makePanels({ send, focus }) {
       row.append(log);
     }
     box.append(row);
+  }
+
+  function renderRuntimes(box) {
+    box.replaceChildren();
+    const c = container;
+    box.append(el('h3', '', 'Containers'));
+    box.append(el('p', 'muted', 'The first one that is running does that check.'));
+    const list = el('ul', 'runtimes');
+    for (const r of c?.runtimes ?? []) {
+      const li = el('li', r.ok ? 'ok' : 'quiet');
+      li.append(el('span', 'name', r.label), el('span', 'why', r.ok ? (r.label === c.runtime ? 'in use' : 'running') : shortWhy(r.why)));
+      list.append(li);
+    }
+    if (!c?.runtimes?.length) list.append(el('li', 'quiet', 'looking…'));
+    box.append(list);
   }
 
   // A field's value as typed -> its YAML value ('' = the default).
@@ -337,7 +362,7 @@ export function makePanels({ send, focus }) {
         input.addEventListener('input', set);
         input.addEventListener('change', set);
         const cell = el('div', 'value');
-        cell.append(input);
+        cell.append(fieldShell(input));
         if (spec.type === 'color') {
           const pick = el('input');
           pick.type = 'color';
@@ -365,7 +390,7 @@ export function makePanels({ send, focus }) {
       o.value = k;
       kindIn.append(o);
     }
-    const addBtn = el('button', '', 'Add');
+    const addBtn = chamferButton('', 'Add');
     addBtn.addEventListener('click', () => {
       const name = nameIn.value.trim();
       if (!/^[a-z][a-z0-9-]{0,30}$/.test(name)) return (settings.note = { bad: true, text: 'A name is lowercase letters, digits and dashes, starting with a letter.' }), renderSettings();
@@ -374,7 +399,7 @@ export function makePanels({ send, focus }) {
       settings.note = null;
       renderSettings();
     });
-    add.append(nameIn, kindIn, addBtn);
+    add.append(fieldShell(nameIn), fieldShell(kindIn), addBtn);
     box.append(add);
   }
 
@@ -385,24 +410,29 @@ export function makePanels({ send, focus }) {
     // Re-render only what changes on its own (the container) while a field
     // is being typed in.
     if (settings.el.childElementCount && active && settings.el.contains(active) && active.matches('input, select')) {
-      renderContainer(settings.el.querySelector('.container-box'));
+      const ghBox = settings.el.querySelector('.gh-sec');
+      const runBox = settings.el.querySelector('.runtimes-box');
+      if (ghBox) renderGhSection(ghBox);
+      if (runBox) renderRuntimes(runBox);
       return;
     }
     settings.el.replaceChildren();
     const head = el('div', 'top');
     head.append(el('h2', '', 'Settings'));
-    const x = el('button', 'link', 'Close');
+    const x = chamferButton('', 'Close');
     x.addEventListener('click', closeSettings);
     head.append(x);
     const body = el('div', 'body');
-    const cbox = el('section', 'container-box');
+    const ghBox = el('section', 'gh-sec');
+    const runBox = el('section', 'runtimes-box');
     const rbox = el('section', 'connectors-box');
-    renderContainer(cbox);
+    renderGhSection(ghBox);
+    renderRuntimes(runBox);
     renderConnectors(rbox);
-    body.append(cbox, rbox);
+    body.append(ghBox, runBox, rbox);
     const foot = el('div', 'foot');
     if (settings.note) foot.append(el('pre', settings.note.bad ? 'bad' : 'ok', settings.note.text));
-    const save = el('button', 'primary', 'Save');
+    const save = chamferButton('primary', 'Save');
     save.disabled = !settings.data?.connectors || Boolean(settings.data.connectors.error);
     save.addEventListener('click', () => {
       settings.note = { text: 'saving…' };
