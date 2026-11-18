@@ -63,6 +63,8 @@ export const DEFAULT_ATTACH =
 const NAME = /^[a-z][a-z0-9-]{0,30}$/;
 const isStr = (v) => typeof v === 'string' && v.trim() !== '';
 
+export const isRemoteAddress = (v) => typeof v === 'string' && /^[\w.:-]+$/.test(v);
+
 const color = (v) => (typeof v === 'string' && /^#[0-9a-fA-F]{6}$/.test(v) ? null : 'must be a color like "#c58af9"');
 
 // field -> [check(value) -> error | null, default (undefined: required)]
@@ -93,7 +95,7 @@ const KIND_FIELDS = {
   },
   'devbox-ctl': {
     color: [color, '#ff9f43'], // orange
-    address: [(v) => (typeof v === 'string' && /^[\w.:-]+$/.test(v) ? null : 'must be a host name or address, e.g. your.hetzner.dns.name'), undefined],
+    address: [(v) => (isRemoteAddress(v) ? null : 'must be a host name or address, e.g. your.hetzner.dns.name'), undefined],
   },
 };
 const fieldsOf = (kind) => ({ ...COMMON, ...(KIND_FIELDS[kind] ?? {}) });
