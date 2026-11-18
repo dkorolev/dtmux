@@ -206,6 +206,21 @@ async function status() {
   }
 }
 
+async function forgetSaved(id, session) {
+  const running = recordedDaemon();
+  if (!running) die('dtmux is not running');
+  const url = new URL(`http://${HOST}:${running.port}/dtmux/forget-saved`);
+  url.searchParams.set('id', id);
+  if (session) url.searchParams.set('session', session);
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'x-dtmux-cli': '1' },
+    signal: AbortSignal.timeout(3000),
+  });
+  if (res.status !== 204) die(`could not forget saved tab ${id} (HTTP ${res.status})`);
+  console.log(`Forgot saved tab ${id}`);
+}
+
 function showConfig() {
   const cfg = config();
   console.log(`# ${CONFIG_PATH}${fs.existsSync(CONFIG_PATH) ? '' : ' (missing; defaults)'}`);
@@ -219,6 +234,7 @@ const USAGE = `usage: dtmux [start | restart [--full] | kill | stop | status | c
            (--full: save the windows as dotted tabs and end tmux as well)
   kill     stop it gently; its tmux sessions end with it (alias: stop)
   status   is it running, and on which port
+  forget-saved <id> [session]  remove a saved tab without taking over the browser session
   config   validate ${CONFIG_PATH} and print the effective config`;
 
 const cmd = process.argv[2] ?? 'start';
@@ -226,5 +242,6 @@ const commands = { start, kill: stop, stop, status, config: showConfig };
 const args = process.argv.slice(3);
 if (cmd === '-h' || cmd === '--help' || cmd === 'help') console.log(USAGE);
 else if (cmd === 'restart' && (args.length === 0 || (args.length === 1 && args[0] === '--full'))) await restart(args[0] === '--full');
+else if (cmd === 'forget-saved' && (args.length === 1 || args.length === 2)) await forgetSaved(...args);
 else if (!commands[cmd] || args.length) die(`unknown command "${process.argv.slice(2).join(' ')}"\n${USAGE}`, 2);
 else await commands[cmd]();
