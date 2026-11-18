@@ -117,7 +117,8 @@ export function startTmuxMode({ container, toolbar, params }) {
           prefix = msg.prefix && msg.prefix !== 'None' ? msg.prefix : null;
           sessionName = msg.session;
           toolbar.setStatus(params.get('session') ? `dtmux · ${msg.session}` : 'dtmux', 'brand');
-          const commit = msg.commit || document.getElementById('status').dataset.commit;
+          const commit = msg.commit ?? statusEl.dataset.commit;
+          statusEl.dataset.commit = commit;
           toolbar.setTitle(
             `tmux session "${msg.session}" · prefix ${prefix ?? 'none'} · ${grid.cols}×${grid.rows}${commit ? ` · ${commit}` : ''}\nRight-click: selection mode, restart`,
           );
@@ -1601,7 +1602,15 @@ export function startTmuxMode({ container, toolbar, params }) {
   function showStatusMenu() {
     const r = statusEl.getBoundingClientRect();
     const settingsItem = ['Settings…', 'gh, the container runtimes, and the connectors', () => panels.showSettings()];
-    showMenu([...selectItems(), null, textSizeRow(), null, settingsItem, ...(canRestart ? [null, ...restartItems()] : [])], r.right, r.bottom + 4);
+    const items = [...selectItems(), null, textSizeRow(), null, settingsItem, ...(canRestart ? [null, ...restartItems()] : [])];
+    const commit = statusEl.dataset.commit;
+    if (commit) {
+      const version = document.createElement('div');
+      version.className = 'menu-commit';
+      version.textContent = commit;
+      items.unshift(version, null);
+    }
+    showMenu(items, r.right, r.bottom + 4);
   }
   onMenuGesture(statusEl, showStatusMenu, { click: true });
   // The press, the movement and the release of a drag all go with Option,
