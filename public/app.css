@@ -1231,3 +1231,9 @@ body {
     grid-template-columns: minmax(0, 1fr);
   }
 }
+
+.tab-menu .menu-commit {
+  padding: 4px 8px;
+  font-family: monospace;
+  opacity: 0.75;
+}
