@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
 import { attachTmuxSession } from './tmux-session.js';
 import { attachShellSession } from './pty-session.js';
+import { takeSaved } from './saved-windows.js';
 import { TMUX_SOCKET } from './tmux-control.js';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -117,7 +118,22 @@ export function startServer({ port, onStop = () => {}, onRestart = () => {}, onS
       res.writeHead(403).end('forbidden');
       return;
     }
-    const pathname = new URL(req.url, `http://${req.headers.host}`).pathname;
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    const { pathname } = url;
+    if (pathname === '/dtmux/forget-saved') {
+      if (req.method !== 'POST' || req.headers['x-dtmux-cli'] !== '1' || req.headers.origin !== undefined) {
+        res.writeHead(403).end('forbidden');
+        return;
+      }
+      const session = url.searchParams.get('session') || DEFAULT_SESSION;
+      const id = url.searchParams.get('id');
+      if (!/^[\w.-]{1,64}$/.test(session) || !id) {
+        res.writeHead(400).end('invalid session or tab ID');
+        return;
+      }
+      res.writeHead(takeSaved(session, id) ? 204 : 404).end();
+      return;
+    }
     if (pathname === HEALTH_PATH) {
       // The CLI uses this to tell a running dtmux from anything else on the port.
       const body = { app: 'dtmux', pid: process.pid, port, tmuxSocket: TMUX_SOCKET, session: DEFAULT_SESSION };
