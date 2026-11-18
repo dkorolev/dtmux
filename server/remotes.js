@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { loadConfig, CONFIG_PATH } from './config.js';
 import { STATE_DIR } from './paths.js';
 import { shellQuote } from './agent-resume.js';
+import { isRemoteAddress } from './remote-config.js';
 import { kindOf } from './remote-kinds.js';
 
 export const REMOTE_OPTION = '@dtmux_remote';
@@ -36,7 +37,7 @@ export function parseRemote(value) {
   return {
     name: m[1],
     host: m[2],
-    address: /^[0-9a-fA-F.:]{2,45}$/.test(addr) ? addr : null,
+    address: isRemoteAddress(addr) ? addr : null,
     upSince: /^\d{9,11}$/.test(up) ? Number(up) : null,
     ended: state === 'ended',
   };

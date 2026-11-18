@@ -400,6 +400,7 @@ test('restoreBranch switches back only when nothing can be hurt', async () => {
 test('remote window values parse, and nothing else does', () => {
   assert.deepEqual(parseRemote('lunanode/dtmux-1a2b3c4d'), { name: 'lunanode', host: 'dtmux-1a2b3c4d', address: null, upSince: null, ended: false });
   assert.deepEqual(parseRemote('lunanode/h|2602:ffb6::1|1793695053'), { name: 'lunanode', host: 'h', address: '2602:ffb6::1', upSince: 1793695053, ended: false });
+  assert.equal(parseRemote('hetzner/account|ssh.dev-box.example||').address, 'ssh.dev-box.example');
   assert.deepEqual(parseRemote('lunanode/h||'), { name: 'lunanode', host: 'h', address: null, upSince: null, ended: false });
   assert.equal(parseRemote('lunanode/h|1.2.3.4;rm|x').address, null);
   assert.equal(parseRemote('lunanode/h|||ended').ended, true);
