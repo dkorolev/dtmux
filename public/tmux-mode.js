@@ -59,6 +59,7 @@ export function startTmuxMode({ container, toolbar, params }) {
 
   const panels = makePanels({ send: (msg) => send(msg), focus: () => panes.get(activePane)?.term.focus() });
   const send = (msg) => {
+    if (msg.t === 'in' && (msg.d === '\x03' || msg.d === '\x04') && panes.get(msg.p)?.initializedOn !== ws) return;
     if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
   };
   const openExternal = (url) => send({ t: 'open', url });
@@ -126,11 +127,15 @@ export function startTmuxMode({ container, toolbar, params }) {
         case 'state':
           applyState(msg);
           break;
-        case 'init':
+        case 'init': {
           // A terminal kept across a reconnect starts over from the snapshot.
-          panes.get(msg.p)?.term.reset();
-          panes.get(msg.p)?.term.write(base64ToBytes(msg.d));
+          const pane = panes.get(msg.p);
+          if (!pane) break;
+          const socket = ev.currentTarget;
+          pane.term.reset();
+          pane.term.write(base64ToBytes(msg.d), () => { pane.initializedOn = socket; });
           break;
+        }
         case 'out':
           panes.get(msg.p)?.term.write(base64ToBytes(msg.d));
           break;
@@ -1356,6 +1361,10 @@ export function startTmuxMode({ container, toolbar, params }) {
         navigator.clipboard.writeText(term.getSelection()).catch((err) => console.warn('copy failed', err));
         term.clearSelection();
       }
+      e.preventDefault();
+      return false;
+    }
+    if (e.ctrlKey && ['KeyC', 'KeyD'].includes(e.code) && panes.get(activePane)?.initializedOn !== ws) {
       e.preventDefault();
       return false;
     }
