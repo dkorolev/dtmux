@@ -156,6 +156,10 @@ export function startTmuxMode({ container, toolbar, params }) {
           tabInfo.set(msg.w, { panes: msg.panes, upSince: msg.upSince ?? null, at: Date.now() });
           renderTabs();
           break;
+        case 'delete-code':
+          deleteCodeAsk?.(msg);
+          deleteCodeAsk = null;
+          break;
         case 'saved':
           savedWindows = Array.isArray(msg.windows) ? msg.windows : [];
           renderTabs();
@@ -604,7 +608,7 @@ export function startTmuxMode({ container, toolbar, params }) {
     };
     button('Reconnect', 'primary', () => send({ t: 'in', p: pane.id, d: '\r' }));
     button(`Delete the ${r.noun}…`, 'danger', () => {
-      confirmDelete(r, w.remote.host, () => send({ t: 'close', w: w.id }));
+      askDeleteCode({ w: w.id }, (code) => confirmDelete(r, w.remote.host, code, () => send({ t: 'close', w: w.id, code })));
     });
     box.append(title, info, row);
     winEl.append(box);
@@ -1111,14 +1115,24 @@ export function startTmuxMode({ container, toolbar, params }) {
     );
   }
 
+  // The daemon issues the digits for a delete (see server/delete-codes.js) and
+  // checks them again when the delete arrives; `then(code)` gets them.
+  let deleteCodeAsk = null;
+  function askDeleteCode(target, then) {
+    deleteCodeAsk = (reply) => {
+      if (reply.code) then(reply.code);
+      else showNotice('Nothing to delete: this tab has no remote machine.', 'bad');
+    };
+    send({ t: 'delete-code', ...target });
+  }
+
   // A remote tab has no Close: a tab gone for good takes its machine with
   // it, so the one item says so. Asks first.
-  // Deleting a machine cannot be undone, so it takes typing four random
-  // digits shown in the dialog, not just a press of Enter on a red button.
+  // Deleting a machine cannot be undone, so it takes typing the four digits
+  // shown in the dialog, not just a press of Enter on a red button.
   // The digits and Enter are enough; Esc, Cancel or a click outside keep it.
-  function confirmDelete(r, host, run) {
+  function confirmDelete(r, host, code, run) {
     document.querySelector('.confirm-delete')?.remove();
-    const code = String(Math.floor(Math.random() * 10000)).padStart(4, '0');
     const thing = r.fullNoun ?? r.noun;
     const shade = document.createElement('div');
     shade.className = 'confirm-delete';
@@ -1189,7 +1203,10 @@ export function startTmuxMode({ container, toolbar, params }) {
       `Delete the ${r.noun}…`,
       `Delete ${what}; this tab goes with it`,
       () => {
-        confirmDelete(r, t.w.remote.host, () => send(t.kind === 'live' ? { t: 'close', w: t.w.id } : { t: 'forget', id: t.key }));
+        const target = t.kind === 'live' ? { w: t.w.id } : { id: t.key };
+        askDeleteCode(target, (code) =>
+          confirmDelete(r, t.w.remote.host, code, () => send({ t: t.kind === 'live' ? 'close' : 'forget', ...target, code })),
+        );
       },
       '#ff6b6b',
     ];
