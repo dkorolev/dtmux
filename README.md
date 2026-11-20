@@ -15,6 +15,24 @@ bin/dtmux.js config     # validate ~/.dtmux.yaml, print the effective config
 
 `npm link` puts `dtmux` on your PATH.
 
+## Single binary
+
+`npm run binary` writes `dist/dtmux`: one file, the Node runtime plus dtmux, the
+page and node-pty. It does not read `node_modules`, so a cleanup that deletes
+those directories leaves it running. `npm run binary -- --install` copies it
+to `~/Library/Application Support/dtmux/dtmux-bin`, points `~/.local/bin/dtmux`
+(and a Homebrew `dtmux` symlink, when that is what is on `PATH`) at it, and
+writes `~/.dtmux/use-binary`. A daemon started from the checkout then hands
+over to that file on its next start, and tmux stays up. `DTMUX_FROM_SOURCE=1`
+skips the hand-over, for running the checkout itself.
+
+The binary is the kind of machine that built it. Building downloads that
+version of Node from nodejs.org once, into `dist/`. A soft restart runs the
+same binary again; rebuild, install, then `dtmux restart`, to pick up edits.
+The page's commit is the one the binary was built from. A remote tab opened
+before the switch keeps its `node …/dtmux-remote.js` command until it is
+opened again.
+
 Then open http://127.0.0.1:7778/. `?session=NAME` opens another tmux session
 and `?mode=shell` opens a plain shell, as before.
 
@@ -359,6 +377,8 @@ Environment overrides, mostly for testing: `DTMUX_CONFIG`, `DTMUX_STATE_DIR`,
 | Path                       | Role                                                 |
 | -------------------------- | ---------------------------------------------------- |
 | `bin/dtmux.js`             | CLI: start, kill, status, config                     |
+| `bin/entry.js`             | dispatch inside the single binary                    |
+| `script/build-binary.mjs`  | builds that binary                                   |
 | `server/daemon.js`         | the detached process; gentle shutdown on SIGTERM     |
 | `server/config.js`         | `~/.dtmux.yaml` loading and strict schema            |
 | `server/saved-windows.js`  | windows saved on stop, offered back as dotted tabs   |

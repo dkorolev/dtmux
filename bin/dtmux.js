@@ -8,14 +8,13 @@
 //   dtmux status      say whether it is running, and where
 //   dtmux config      validate ~/.dtmux.yaml and print the effective config
 import fs from 'node:fs';
-import path from 'node:path';
+import os from 'node:os';
 import { spawn, execFileSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+import { isSea } from 'node:sea';
 import { stringify } from 'yaml';
 import { loadConfig, ConfigError, CONFIG_PATH } from '../server/config.js';
 import { PID_FILE, LOG_FILE, STATE_DIR } from '../server/paths.js';
-
-const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
+import { daemonSpawn, repoRoot } from '../server/locate.js';
 const HOST = '127.0.0.1';
 const HEALTH_PATH = '/dtmux/health';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -112,8 +111,9 @@ async function start() {
 
   fs.mkdirSync(STATE_DIR, { recursive: true });
   const out = fs.openSync(LOG_FILE, 'a');
-  const child = spawn(process.execPath, [path.join(ROOT, 'server', 'daemon.js'), String(port)], {
-    cwd: process.env.HOME || ROOT,
+  const [exec, args] = daemonSpawn(port);
+  const child = spawn(exec, args, {
+    cwd: process.env.HOME || (isSea() ? os.homedir() : repoRoot()),
     detached: true,
     stdio: ['ignore', out, out],
     env: daemonEnv(),
@@ -227,21 +227,32 @@ function showConfig() {
   process.stdout.write(stringify(cfg));
 }
 
+const restartLine = isSea()
+  ? 'start this binary again; tmux, its windows and shells keep running'
+  : 'run the code on disk now; tmux, its windows and shells keep running';
 const USAGE = `usage: dtmux [start | restart [--full] | kill | stop | status | config]
 
   start    start the daemon unless it is running (the default)
-  restart  run the code on disk now; tmux, its windows and shells keep running
+  restart  ${restartLine}
            (--full: save the windows as dotted tabs and end tmux as well)
   kill     stop it gently; its tmux sessions end with it (alias: stop)
   status   is it running, and on which port
   forget-saved <id> [session]  remove a saved tab without taking over the browser session
   config   validate ${CONFIG_PATH} and print the effective config`;
 
-const cmd = process.argv[2] ?? 'start';
-const commands = { start, kill: stop, stop, status, config: showConfig };
-const args = process.argv.slice(3);
-if (cmd === '-h' || cmd === '--help' || cmd === 'help') console.log(USAGE);
-else if (cmd === 'restart' && (args.length === 0 || (args.length === 1 && args[0] === '--full'))) await restart(args[0] === '--full');
-else if (cmd === 'forget-saved' && (args.length === 1 || args.length === 2)) await forgetSaved(...args);
-else if (!commands[cmd] || args.length) die(`unknown command "${process.argv.slice(2).join(' ')}"\n${USAGE}`, 2);
-else await commands[cmd]();
+// Not top-level await: the single binary's bundle is CommonJS.
+async function cli() {
+  const cmd = process.argv[2] ?? 'start';
+  const commands = { start, kill: stop, stop, status, config: showConfig };
+  const args = process.argv.slice(3);
+  if (cmd === '-h' || cmd === '--help' || cmd === 'help') console.log(USAGE);
+  else if (cmd === 'restart' && (args.length === 0 || (args.length === 1 && args[0] === '--full'))) await restart(args[0] === '--full');
+  else if (cmd === 'forget-saved' && (args.length === 1 || args.length === 2)) await forgetSaved(...args);
+  else if (!commands[cmd] || args.length) die(`unknown command "${process.argv.slice(2).join(' ')}"\n${USAGE}`, 2);
+  else await commands[cmd]();
+}
+
+cli().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});
