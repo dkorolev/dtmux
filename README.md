@@ -175,8 +175,9 @@ remotes:
   session, read from `~/.claude/sessions/<pid>.json`. When the tab finds the
   tmux gone (out of memory, `tmux kill-server`, a restart), it shows what ran
   there, with any `oom` lines from the user journal since, and offers a new
-  tmux with them resumed (Enter), a new empty one (`n`), or the usual choices
-  (Ctrl+C). The script is moved aside first (`~/.dtmux/lost-<time>.sh`), so
+  tmux with them resumed and this tab attached to it (Enter), a new empty one
+  which this tab also attaches to (`n`), or the usual choices (Ctrl+C). The
+  script is moved aside first (`~/.dtmux/lost-<time>.sh`), so
   `sh ~/.dtmux/lost-<time>.sh run` still resumes them later. A plain `ssh`
   login gets the same report from a line dtmux adds to `~/.bashrc`, while no
   tmux runs there: `sh ~/.dtmux/restore.sh run && tmux attach -t dtmux`.

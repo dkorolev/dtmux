@@ -215,7 +215,7 @@ async function connect(address, fresh, { probe = false } = {}) {
             tries = 0;
             continue;
           }
-          expectNew = true; // asked already
+          expectNew = true; // asked already; the ssh below attaches this tab to that tmux
         }
         if (since === 0 ? !expectNew : tmuxSince !== null && since !== tmuxSince) {
           shellsEnded(since, tmuxSince);
@@ -427,7 +427,8 @@ async function takeLost(base) {
   return out === null ? null : parseLost(out);
 }
 
-// Show what ran there and offer it back: 'resumed', 'empty' (a new tmux
+// Show what ran there and offer it back. Either answer starts a tmux, and the
+// caller then attaches this tab to it: 'resumed', 'empty' (a new tmux
 // without them), or 'menu' (Ctrl+C: reconnect or delete).
 async function offerLost(base, lost) {
   const what = `${remote.label} ${kind.noun} ${host}`;
@@ -435,10 +436,13 @@ async function offerLost(base, lost) {
   red(`There is no tmux on ${what} any more: it was killed (out of memory, tmux kill-server) or the machine restarted.`);
   for (const line of lost.report.split('\n')) say(line, '33');
   const n = lost.count === 1 ? 'it' : `these ${lost.count}`;
-  const key = await interactive(() => askKey(`Enter: a new tmux with ${n} resumed · n: a new, empty tmux · Ctrl+C: other choices`, ['\r', '\n', 'n', 'N', '\x03']));
+  const offer =
+    `Enter: a new tmux with ${n} resumed, and this tab attached to it · ` +
+    'n: a new, empty tmux, and this tab attached · Ctrl+C: other choices';
+  const key = await interactive(() => askKey(offer, ['\r', '\n', 'n', 'N', '\x03']));
   if (key === null || key === '\x03') return 'menu';
   if (key === 'n' || key === 'N') {
-    say(`Starting it empty; ${lost.file} still resumes them: sh ${lost.file} run`);
+    say(`Starting an empty tmux and attaching this tab; ${lost.file} still resumes them: sh ${lost.file} run`);
     return 'empty';
   }
   const out = await sshOut(base, `sh ${lost.file} run 2>&1`);
