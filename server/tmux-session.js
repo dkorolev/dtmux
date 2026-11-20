@@ -274,7 +274,10 @@ function bridge(ws, opts) {
   });
   // Ahead of every other command, so the first window keeps its saved id.
   if (first) tmux.run(`set-option -w ${ID_OPTION} ${quote(first.id)}`);
-  if (firstRemote) tmux.run(`set-option -w ${REMOTE_OPTION} ${quote(remoteValue(firstRemote))}`);
+  if (firstRemote) tmux.runList([
+    `set-option -w ${REMOTE_OPTION} ${quote(remoteValue(firstRemote))}`,
+    'set-option -p @dtmux_connecting 1',
+  ]);
   if (firstPlan)
     tmux.run('display -p "#{window_id} #{pane_id}"', (err, lines) => {
       if (err) return;
@@ -886,6 +889,7 @@ function bridge(ws, opts) {
         `new-window -P -F "#{pane_id}" -c ${quote(os.homedir())} -n ${quote(name)} ${quote(remoteCommand(where, { create }))}`,
         `set-option -w ${ID_OPTION} ${quote(id)}`,
         `set-option -w ${REMOTE_OPTION} ${quote(remoteValue(where))}`,
+        'set-option -p @dtmux_connecting 1',
       ],
       ([made]) => made.err && send({ t: 'notice', text: `Could not open "${name}": ${made.err.message}`, kind: 'bad' }),
     );
@@ -986,10 +990,18 @@ function bridge(ws, opts) {
   // encoded them for whatever modes the program in the pane asked for.
   function sendBytes(id, bytes) {
     for (let i = 0; i < bytes.length; i += SEND_CHUNK) {
-      const hex = Array.from(bytes.subarray(i, i + SEND_CHUNK), (b) => b.toString(16).padStart(2, '0'));
-      tmux.run(`send-keys -H -t ${id} ${hex.join(' ')}`);
+      tmux.run(paneInputCommand(id, bytes.subarray(i, i + SEND_CHUNK)));
     }
   }
+}
+
+// Evaluate the guard in tmux at delivery time; its helper may have reconnected.
+export function paneInputCommand(id, bytes) {
+  const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join(' ');
+  const keys = `send-keys -H -t ${id} ${hex}`;
+  if (bytes.length === 1 && (bytes[0] === 3 || bytes[0] === 4))
+    return `if-shell -F -t ${id} '#{!=:#{@dtmux_connecting},1}' ${quote(keys)}`;
+  return keys;
 }
 
 // The swap-window pairs that put `current` windows ({ id, index }) into the

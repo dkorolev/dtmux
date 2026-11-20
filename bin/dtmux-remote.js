@@ -53,8 +53,24 @@ process.on('SIGHUP', () => {
   if (!making) process.exit(129);
 });
 process.stdout.on('error', () => {});
+// During controller and SSH probes a terminal interrupt must not kill the tab helper.
+process.on('SIGINT', () => {});
+
+function waitingForConnection(waiting) {
+  tmux('set-option', '-p', '@dtmux_connecting', waiting ? '1' : '0');
+}
+
+async function interactive(read) {
+  waitingForConnection(false);
+  try {
+    return await read();
+  } finally {
+    waitingForConnection(true);
+  }
+}
 
 async function main() {
+  waitingForConnection(true);
   if (!name || !host) throw new Error('usage: dtmux-remote.js <remote> <host> [--new | --addr <address> [--up <secs>]]');
   remote = loadConfig().remotes?.[name];
   if (!remote) throw new Error(`No remote "${name}" in ${process.env.DTMUX_CONFIG || '~/.dtmux.yaml'} (remotes: ...).`);
@@ -100,8 +116,9 @@ async function settle() {
   }
   if (found.none && mayCreate) return make();
   warn(found.gone ?? `${host} is not there.`);
-  const again = `Press Enter to make a new ${remote.label} ${kind.noun} (${kind.lifetime(remote)}), Ctrl+C to close this tab.`;
-  if (!(await ask(again))) return null;
+  const again = `Press Enter to make a new ${remote.label} ${kind.noun} (${kind.lifetime(remote)}), Esc to close this tab.`;
+  const choice = await askKey(again, ['\r', '\n', '\x1b']);
+  if (choice === null || choice === '\x1b') return null;
   host = kind.newHost(remote);
   adopt(host);
   mayCreate = true;
@@ -202,7 +219,8 @@ async function connect(address, fresh, { probe = false } = {}) {
         }
         if (since === 0 ? !expectNew : tmuxSince !== null && since !== tmuxSince) {
           shellsEnded(since, tmuxSince);
-          if (!(await ask(`Press Enter to ${since ? 'join the tmux there now' : 'start a new tmux there'}, Ctrl+C for other choices.`))) {
+          const question = `Press Enter to ${since ? 'join the tmux there now' : 'start a new tmux there'}, Ctrl+C for other choices.`;
+          if (!(await interactive(() => ask(question)))) {
             const next = await ended(`The shells on ${remote.label} ${kind.noun} ${host} ended`);
             if (next !== 'reconnect') return;
             tries = 0;
@@ -219,15 +237,22 @@ async function connect(address, fresh, { probe = false } = {}) {
         const learn = tmuxSince
           ? null
           : setTimeout(() => remoteTmuxStart(base).then((s) => s && (tmuxSince ??= s)), 5000);
-        // Ctrl+C belongs to the remote side while ssh runs.
-        const keep = () => {};
-        process.on('SIGINT', keep);
         code = await new Promise((resolve) => {
-          const child = spawn('ssh', ['-t', ...base, remote.attach], { stdio: 'inherit' });
+          // The default remote tmux draws its screen on stdout. Until then a
+          // control key from the page could be buffered for a shell nobody sees.
+          const screen = remote.attach === DEFAULT_ATTACH;
+          if (!screen) waitingForConnection(false); // custom commands may silently wait for input
+          const child = spawn('ssh', ['-t', ...base, remote.attach], {
+            stdio: ['inherit', screen ? 'pipe' : 'inherit', 'inherit'],
+          });
+          if (screen) {
+            child.stdout.once('data', () => waitingForConnection(false));
+            child.stdout.pipe(process.stdout, { end: false });
+          }
           child.on('error', () => resolve(255));
           child.on('close', (c) => resolve(c ?? 255));
         });
-        process.off('SIGINT', keep);
+        waitingForConnection(true);
         clearTimeout(first);
         clearTimeout(learn);
         snapping?.stop();
@@ -281,7 +306,7 @@ async function connect(address, fresh, { probe = false } = {}) {
       }
       const wait = reconnectDelay(++fails);
       warn(`The connection dropped; connecting again in ${Math.round(wait / 1000)}s (Ctrl+C: other choices)…`);
-      if (await interruptibleSleep(wait)) {
+      if (await interactive(() => interruptibleSleep(wait))) {
         const next = await ended(`Not connected to ${remote.label} ${kind.noun} ${host}`);
         if (next === 'reconnect') {
           tries = 0;
@@ -305,10 +330,10 @@ async function ended(why) {
   try {
     for (;;) {
       say(`${why}; the ${kind.noun} is still there (${kind.lifetime(remote)}).`);
-      const key = await askKey(`Enter: reconnect · d: delete the ${kind.noun} (and this tab)`, ['\r', '\n', 'd', 'D']);
+      const key = await interactive(() => askKey(`Enter: reconnect · d: delete the ${kind.noun} (and this tab)`, ['\r', '\n', 'd', 'D']));
       if (key === null) return 'close';
       if (key === '\r' || key === '\n') return 'reconnect';
-      if ((await askCode()) && (await removeMachine(`you pressed d in the tab and typed the code (${why})`))) return 'deleted';
+      if ((await interactive(askCode)) && (await removeMachine(`you pressed d in the tab and typed the code (${why})`))) return 'deleted';
     }
   } finally {
     tmux('set-option', '-wu', '@dtmux_remote_state');
@@ -410,7 +435,7 @@ async function offerLost(base, lost) {
   red(`There is no tmux on ${what} any more: it was killed (out of memory, tmux kill-server) or the machine restarted.`);
   for (const line of lost.report.split('\n')) say(line, '33');
   const n = lost.count === 1 ? 'it' : `these ${lost.count}`;
-  const key = await askKey(`Enter: a new tmux with ${n} resumed · n: a new, empty tmux · Ctrl+C: other choices`, ['\r', '\n', 'n', 'N', '\x03']);
+  const key = await interactive(() => askKey(`Enter: a new tmux with ${n} resumed · n: a new, empty tmux · Ctrl+C: other choices`, ['\r', '\n', 'n', 'N', '\x03']));
   if (key === null || key === '\x03') return 'menu';
   if (key === 'n' || key === 'N') {
     say(`Starting it empty; ${lost.file} still resumes them: sh ${lost.file} run`);
@@ -555,7 +580,7 @@ function ask(text) {
 }
 
 async function finish() {
-  await ask('Press Enter to close this tab.');
+  await askKey('Press Enter to close this tab.', ['\r', '\n']);
   process.exit(0);
 }
 
