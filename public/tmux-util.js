@@ -163,6 +163,32 @@ export function tmuxKeyName(e) {
   return name;
 }
 
+// How far a wheel event should move the tab strip, in pixels. A mouse wheel
+// is vertical; over the strip that scrolls the tabs sideways. A sideways
+// gesture (a trackpad) is added too, because the tabs themselves opt out of
+// the browser's own panning so a finger can drag one.
+// DOM_DELTA_PIXEL is 0, DOM_DELTA_LINE is 1, DOM_DELTA_PAGE is 2.
+export function tabStripDelta(e, clientWidth) {
+  const scale = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? clientWidth : 1;
+  return ((e.deltaX || 0) + (e.deltaY || 0)) * scale;
+}
+
+// `bar` is the tab strip element. The listener is not passive, so a wheel
+// that moves the tabs does not also scroll the page.
+export function bindTabStripWheel(bar) {
+  bar.addEventListener(
+    'wheel',
+    (e) => {
+      if (bar.scrollWidth <= bar.clientWidth) return;
+      const delta = tabStripDelta(e, bar.clientWidth);
+      if (!delta) return;
+      e.preventDefault();
+      bar.scrollLeft += delta;
+    },
+    { passive: false },
+  );
+}
+
 // The toolbar's tab order. `items` are the tabs to show ({ key, ... }), in
 // their natural order (live windows by index, then saved ones). Keys `order`
 // knows keep their place in it; new keys go last. Keys not shown now stay in

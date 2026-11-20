@@ -4,6 +4,7 @@
 //   /?mode=shell       a plain shell without tmux
 import { startTmuxMode } from './tmux-mode.js';
 import { startShellMode } from './shell-mode.js';
+import { bindTabStripWheel } from './tmux-util.js';
 
 const statusEl = document.getElementById('status');
 const indicatorEl = document.getElementById('indicator');
@@ -36,6 +37,8 @@ export const toolbar = {
     return btn;
   },
 };
+
+bindTabStripWheel(toolbar.tabs);
 
 const params = new URLSearchParams(location.search);
 const container = document.getElementById('terminal');
