@@ -229,7 +229,11 @@ async function connect(address, fresh, { probe = false } = {}) {
         }
         expectNew = false;
         fails = 0;
+        // Nothing was running at the check above, so this join starts the tmux.
+        // Forget the previous start time. Keeping it would make the next
+        // reconnect call this new tmux a restart and wait for Enter before joining.
         if (since) tmuxSince = since;
+        else tmuxSince = null;
         // Once ssh is in (and its shared connection up), not alongside it.
         const first = kind.keepAlive ? setTimeout(touch, 10000) : null;
         const snapping = remote.attach === DEFAULT_ATTACH ? snapshotEvery(base) : null;
