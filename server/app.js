@@ -2,26 +2,17 @@
 // connection either to a tmux session in control mode (the default) or to a
 // plain shell in a PTY (?mode=shell).
 import http from 'node:http';
-import fs from 'node:fs';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
-import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
 import { attachTmuxSession } from './tmux-session.js';
 import { attachShellSession } from './pty-session.js';
 import { takeSaved } from './saved-windows.js';
 import { TMUX_SOCKET } from './tmux-control.js';
-
-const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
+import { startCommand } from './locate.js';
+import { VENDOR, readRepoFile, repoFileExists, pageFingerprint, bakedCommit, gitCommit } from './assets.js';
 
 // The command the page shows for starting the daemon again once it is gone.
-const START_CMD = (() => {
-  const bin = path.join(ROOT, 'bin', 'dtmux.js');
-  const shell = /^[\w\/.-]+$/.test(bin) ? bin : `'${bin.replaceAll("'", `'\\''`)}'`;
-  return shell.replaceAll('&', '&amp;').replaceAll('"', '&quot;').replaceAll('<', '&lt;');
-})();
-const PUBLIC = path.join(ROOT, 'public');
+const START_CMD = startCommand();
 export const HOST = '127.0.0.1';
 export const DEFAULT_SESSION = process.env.DTMUX_SESSION || 'dtmux';
 export const HEALTH_PATH = '/dtmux/health';
@@ -51,38 +42,16 @@ export function isLocalRequest(req, { requireOrigin = false } = {}) {
 
 // First seven hex digits of HEAD, plus "-dirty" when the worktree has
 // uncommitted changes. Read per page and per connection so a refresh shows
-// the repo as it is now.
+// the repo as it is now. The binary has no worktree; it shows the commit it
+// was built from.
 function readCommit() {
-  const opts = { cwd: ROOT, encoding: 'utf8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'] };
-  try {
-    const hash = execFileSync('git', ['rev-parse', 'HEAD'], opts).trim().slice(0, 7);
-    if (!/^[0-9a-f]{7}$/.test(hash)) return '';
-    const dirty = execFileSync('git', ['status', '--porcelain'], opts).trim() ? '-dirty' : '';
-    return hash + dirty;
-  } catch {
-    return '';
-  }
+  return bakedCommit() ?? gitCommit();
 }
 
-// A fingerprint of the files the page runs (public/), read now. A page that
-// was loaded from other files reloads itself when it (re)connects, so a soft
-// restart, or any reconnect, brings the browser side up to date as well.
-function readBuild() {
-  const hash = createHash('sha1');
-  const walk = (dir) => {
-    for (const ent of fs.readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
-      const file = path.join(dir, ent.name);
-      if (ent.isDirectory()) walk(file);
-      else if (ent.isFile()) hash.update(path.relative(PUBLIC, file)).update('\0').update(fs.readFileSync(file));
-    }
-  };
-  try {
-    walk(PUBLIC);
-  } catch {
-    return '';
-  }
-  return hash.digest('hex').slice(0, 12);
-}
+// A fingerprint of the files the page runs (public/). A page that was loaded
+// from other files reloads itself when it (re)connects, so a soft restart,
+// or any reconnect, brings the browser side up to date as well.
+const readBuild = pageFingerprint;
 
 const TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -91,22 +60,20 @@ const TYPES = {
   '.css': 'text/css',
   '.svg': 'image/svg+xml',
 };
-const VENDOR = {
-  'xterm.mjs': 'node_modules/@xterm/xterm/lib/xterm.mjs',
-  'xterm.css': 'node_modules/@xterm/xterm/css/xterm.css',
-  'addon-fit.mjs': 'node_modules/@xterm/addon-fit/lib/addon-fit.mjs',
-  'addon-web-links.mjs': 'node_modules/@xterm/addon-web-links/lib/addon-web-links.mjs',
-  'addon-webgl.mjs': 'node_modules/@xterm/addon-webgl/lib/addon-webgl.mjs',
-};
 
-// Our page and modules from public/, plus the xterm.js bundles from node_modules.
+// Our page and modules from public/, plus the xterm.js bundles. A key
+// relative to the checkout (or the binary's embedded copy of it), or null.
 function resolveStatic(pathname) {
   if (pathname.startsWith('/vendor/')) {
-    const file = VENDOR[pathname.slice('/vendor/'.length)];
-    return file && path.join(ROOT, file);
+    const rel = VENDOR[pathname.slice('/vendor/'.length)];
+    return rel && repoFileExists(rel) ? rel : null;
   }
-  const file = path.normalize(path.join(PUBLIC, pathname === '/' ? 'index.html' : pathname));
-  return file.startsWith(PUBLIC + path.sep) ? file : null;
+  const raw = pathname === '/' ? 'index.html' : pathname.replace(/^\/+/, '');
+  if (raw.includes('\0')) return null;
+  const norm = path.posix.normalize(raw);
+  if (norm.startsWith('../') || norm === '..' || path.posix.isAbsolute(norm)) return null;
+  const rel = `public/${norm}`;
+  return repoFileExists(rel) ? rel : null;
 }
 
 // Resolves with the listening server once it is bound to `port`.
@@ -146,25 +113,26 @@ export function startServer({ port, onStop = () => {}, onRestart = () => {}, onS
       res.writeHead(404).end('not found');
       return;
     }
-    fs.readFile(file, (err, data) => {
-      if (err) {
-        res.writeHead(err.code === 'ENOENT' ? 404 : 500).end(err.code === 'ENOENT' ? 'not found' : err.message);
-        return;
-      }
-      const type = TYPES[path.extname(file)] ?? 'application/octet-stream';
-      if (path.basename(file) === 'index.html') {
-        data = Buffer.from(
-          String(data)
-            .replaceAll('__XTERMJS_COMMIT__', readCommit())
-            .replaceAll('__DTMUX_BUILD__', readBuild())
-            .replaceAll('__DTMUX_START_CMD__', START_CMD),
-        );
-      }
-      // no-store: a refresh must run the files just read, not a module the
-      // browser kept from before this process knew the commit.
-      res.writeHead(200, { 'Content-Type': type, 'Cache-Control': 'no-store' });
-      res.end(data);
-    });
+    let data;
+    try {
+      data = readRepoFile(file);
+    } catch (err) {
+      res.writeHead(err.code === 'ENOENT' ? 404 : 500).end(err.code === 'ENOENT' ? 'not found' : err.message);
+      return;
+    }
+    const type = TYPES[path.extname(file)] ?? 'application/octet-stream';
+    if (path.basename(file) === 'index.html') {
+      data = Buffer.from(
+        String(data)
+          .replaceAll('__XTERMJS_COMMIT__', readCommit())
+          .replaceAll('__DTMUX_BUILD__', readBuild())
+          .replaceAll('__DTMUX_START_CMD__', START_CMD),
+      );
+    }
+    // no-store: a refresh must run the files just read, not a module the
+    // browser kept from before this process knew the commit.
+    res.writeHead(200, { 'Content-Type': type, 'Cache-Control': 'no-store' });
+    res.end(data);
   });
   server.on('connection', (socket) => {
     if (!isLoopback(socket.remoteAddress)) socket.destroy();

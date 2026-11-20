@@ -7,16 +7,22 @@
 # Run again after changing dtmux-app.swift. The app is rebuilt only when its
 # source changed: a rebuilt app is new to macOS, which then asks for its
 # permissions again. Needs swiftc (Xcode or its command line tools).
+# The program it runs is the single binary (script/build-binary.mjs), which
+# still accepts the `<bin/dtmux.js> <op>` arguments this app has always passed.
 # Undo: launchctl bootout gui/$(id -u)/com.dima.dtmux, then remove
 # ~/Library/LaunchAgents/com.dima.dtmux.plist and the app.
 set -eu
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-NODE=$(command -v node)
 TMUX_PATH=$(command -v tmux || true)
 AGENTS="$HOME/Library/LaunchAgents"
 APPS="$HOME/Library/Application Support/dtmux"
 APP="$APPS/dtmux.app"
+# node builds the binary; the app runs the binary, not node. The binary
+# accepts the same `<bin/dtmux.js> <op>` arguments the app passes.
+command -v node >/dev/null
+node "$ROOT/script/build-binary.mjs" --install
+NODE="$APPS/dtmux-bin"
 LOGS="$HOME/Library/Logs"
 DOMAIN="gui/$(id -u)"
 LABEL=com.dima.dtmux

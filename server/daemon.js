@@ -6,16 +6,17 @@
 // sends SIGHUP to the shells in its panes), removes its pid file and exits.
 // The next start begins with fresh tmux sessions and offers the saved windows
 // as dotted tabs. A restart does the same and then starts a new daemon on the
-// same port, running the code as it is on disk now. A soft restart starts the
-// new daemon without touching tmux: sessions, windows and shells keep running
-// and pages reattach to them.
+// same port, running the code as it is on disk now (the binary itself, when
+// this process is the single binary). A soft restart starts the new daemon
+// without touching tmux: sessions, windows and shells keep running and pages
+// reattach to them.
 //
 // Every 30 s it also writes down what is open (live-snapshot.js), so that a
 // stop that could not save (a crash, power loss, tmux gone first at a
 // reboot) still brings the windows back as dotted tabs on the next start.
 import fs from 'node:fs';
 import { execFile, execFileSync, spawn } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+import { isSea } from 'node:sea';
 import { startServer, HOST, DEFAULT_SESSION } from './app.js';
 import { TMUX_BIN, TMUX_SOCKET, tmuxArgs } from './tmux-control.js';
 import { PID_FILE, STATE_DIR, LOG_FILE, HANDOVER_FILE } from './paths.js';
@@ -25,13 +26,18 @@ import { closeAgents } from './agent-close.js';
 import { LIVE_FORMAT, parseLive, writeSnapshot, readSnapshot, dropSnapshot } from './live-snapshot.js';
 import { listPanes, agentsByPane } from './window-panes.js';
 import { sweepMachines, SWEEP_MS } from './machine-sweep.js';
+import { daemonSpawn } from './locate.js';
+import { maybeHandoffToBinary } from './binary-handoff.js';
 
 const port = Number(process.argv[2]);
 const restarted = process.argv[3] === '--restarted';
 if (!Number.isInteger(port)) {
-  console.error('usage: daemon.js <port>   (run `dtmux start` instead)');
+  console.error(`usage: ${isSea() ? 'dtmux --daemon' : 'daemon.js'} <port>   (run \`dtmux start\` instead)`);
   process.exit(2);
 }
+// Before anything else, so a hand-over file written by the daemon we are
+// replacing is still there for the binary we start.
+if (maybeHandoffToBinary()) process.exit(0);
 
 // Bump only for a change a newer daemon could not read. Readers take the
 // sections they know and skip the rest, so adding a section needs no bump;
@@ -41,37 +47,51 @@ const HANDOVER_VERSION = 1;
 process.title = 'dtmux';
 const log = (msg) => console.log(`${new Date().toISOString()} [${process.pid}] ${msg}`);
 
-takeHandOver();
-recoverSnapshot();
-
 let server, wss;
-// After a restart the old daemon has just let go of the port; give the OS a
-// moment if it has not caught up.
-for (let tries = 0; ; tries++) {
-  try {
-    ({ server, wss } = await startServer({
-      port,
-      onStop: () => shutdown('Stop'),
-      onRestart: () => shutdown('Restart button', { restart: true }),
-      onSoftRestart: () => shutdown('Soft restart button', { restart: true, soft: true }),
-    }));
-    break;
-  } catch (err) {
-    if (restarted && err.code === 'EADDRINUSE' && tries < 50) {
-      await new Promise((r) => setTimeout(r, 100));
-      continue;
-    }
-    log(`cannot listen on ${HOST}:${port}: ${err.message}`);
-    process.exit(1);
-  }
-}
-fs.mkdirSync(STATE_DIR, { recursive: true });
-fs.writeFileSync(PID_FILE, JSON.stringify({ pid: process.pid, port }) + '\n');
-log(`listening on http://${HOST}:${port}/  (tmux -L ${TMUX_SOCKET}, session "${DEFAULT_SESSION}")`);
-
 let stopping = false;
+
+// Not top-level await: the single binary's bundle is CommonJS. The snapshot
+// and signal handlers below are registered at once; the first snapshot is
+// not due for 30 s, which is after this has either listened or exited.
+async function listen() {
+  takeHandOver();
+  recoverSnapshot();
+  // After a restart the old daemon has just let go of the port; give the OS a
+  // moment if it has not caught up.
+  for (let tries = 0; ; tries++) {
+    try {
+      ({ server, wss } = await startServer({
+        port,
+        onStop: () => shutdown('Stop'),
+        onRestart: () => shutdown('Restart button', { restart: true }),
+        onSoftRestart: () => shutdown('Soft restart button', { restart: true, soft: true }),
+      }));
+      break;
+    } catch (err) {
+      if (restarted && err.code === 'EADDRINUSE' && tries < 50) {
+        await new Promise((r) => setTimeout(r, 100));
+        continue;
+      }
+      log(`cannot listen on ${HOST}:${port}: ${err.message}`);
+      process.exit(1);
+    }
+  }
+  fs.mkdirSync(STATE_DIR, { recursive: true });
+  fs.writeFileSync(PID_FILE, JSON.stringify({ pid: process.pid, port }) + '\n');
+  log(`listening on http://${HOST}:${port}/  (tmux -L ${TMUX_SOCKET}, session "${DEFAULT_SESSION}")`);
+}
+
+listen().catch((err) => {
+  log(err.stack || err.message);
+  process.exit(1);
+});
+
 function shutdown(signal, { restart = false, soft = false } = {}) {
   if (stopping) return;
+  if (!server) {
+    process.exit(0);
+    return;
+  }
   stopping = true;
   log(`${signal}: stopping`);
   // Never hang on the way out.
@@ -161,7 +181,8 @@ function takeHandOver() {
 function startAgain() {
   try {
     const out = fs.openSync(LOG_FILE, 'a');
-    const child = spawn(process.execPath, [fileURLToPath(import.meta.url), String(port), '--restarted'], {
+    const [exec, args] = daemonSpawn(port, { restarted: true });
+    const child = spawn(exec, args, {
       cwd: process.cwd(),
       detached: true,
       stdio: ['ignore', out, out],

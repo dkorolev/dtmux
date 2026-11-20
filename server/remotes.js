@@ -1,14 +1,14 @@
 // Tabs that live on a remote machine. Such a tab is an ordinary tmux window
-// here whose pane runs bin/dtmux-remote.js: it makes or finds the VM and
+// here whose pane runs the remote helper (bin/dtmux-remote.js, or
+// `--remote` of the single binary): it makes or finds the VM and
 // ssh-es into it, where the shells run in the VM's own tmux. The window
 // option @dtmux_remote ("<remote>/<host>") marks it, so saving the window
 // (a Disconnect, a full restart) remembers the VM and reopening the tab joins
 // that same VM again.
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { loadConfig, CONFIG_PATH } from './config.js';
 import { STATE_DIR } from './paths.js';
 import { shellQuote } from './agent-resume.js';
+import { remoteExec } from './locate.js';
 import { isRemoteAddress } from './remote-config.js';
 import { kindOf } from './remote-kinds.js';
 
@@ -25,8 +25,6 @@ export const REMOTE_FORMAT = `#{${REMOTE_OPTION}}|#{${REMOTE_ADDR_OPTION}}|#{${R
 // What the page's control client subscribes to (refresh-client -B), to hear
 // at once when the helper changes them: options change no other notification.
 export const REMOTE_SUBSCRIPTION = `dtmux-remote:@*:#{${REMOTE_ADDR_OPTION}}|#{${REMOTE_UP_OPTION}}|#{${REMOTE_STATE_OPTION}}`;
-
-const HELPER = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'bin', 'dtmux-remote.js');
 
 // "lunanode/dtmux-1a2b3c4d", or REMOTE_FORMAT's "lunanode/dtmux-1a2b3c4d|addr|up|state",
 // -> { name, host, address, upSince, ended }; anything else -> null.
@@ -58,6 +56,7 @@ export const newHost = (remote) => kindOf(remote).newHost(remote);
 export function remoteCommand({ name, host, address, upSince }, { create = false } = {}) {
   const env = `DTMUX_CONFIG=${shellQuote(CONFIG_PATH)} DTMUX_STATE_DIR=${shellQuote(STATE_DIR)}`;
   const known = [...(address ? ['--addr', address] : []), ...(upSince ? ['--up', String(upSince)] : [])];
+  const [exec, pre] = remoteExec();
   const args = [name, host, ...(create ? ['--new'] : known)].map(shellQuote).join(' ');
-  return `${env} exec ${shellQuote(process.execPath)} ${shellQuote(HELPER)} ${args}`;
+  return `${env} exec ${shellQuote(exec)} ${pre.map(shellQuote).join(' ')} ${args}`;
 }
