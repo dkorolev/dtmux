@@ -131,7 +131,9 @@ remotes:
   **Delete the VM / account…** (live or dotted), which deletes the machine,
   and the tab goes with it. It works on a stuck tab too. Every delete asks
   you to type four random digits it shows, then **Confirm delete** (or
-  Enter); a single press of Enter on a red button is not enough.
+  Enter); a single press of Enter on a red button is not enough. The daemon
+  issues those digits and checks them itself, once and for a minute, so a
+  delete sent without the right code is refused and the tab stays.
   **Disconnect** keeps the machine, with a dotted tab to join it again.
 - **Ctrl+D deletes; a crash does not.** When the last shell on the machine
   exits by itself (Ctrl+D, `exit`), the machine is deleted and the tab

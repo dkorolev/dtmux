@@ -62,7 +62,8 @@ import { findResumeHint } from './resume-hint.js';
 import { windowInfo } from './pane-info.js';
 import { closeAgents } from './agent-close.js';
 import { branchOf, restoreBranch } from './git-branch.js';
-import { savedFor, takeSaved, addSaved, renameSaved, savedEvents, newWindowId, ID_OPTION } from './saved-windows.js';
+import { savedFor, allSaved, takeSaved, addSaved, renameSaved, savedEvents, newWindowId, ID_OPTION } from './saved-windows.js';
+import { issueDeleteCode, takeDeleteCode } from './delete-codes.js';
 import { REMOTE_OPTION, REMOTE_UP_OPTION, REMOTE_FORMAT, REMOTE_SUBSCRIPTION, parseRemote, remoteValue, currentRemotes, newHost, remoteCommand } from './remotes.js';
 import { pageRemotes } from './remote-config.js';
 import { SPLIT_HOOK, remoteAction, actionKeys } from './remote-keys.js';
@@ -166,6 +167,49 @@ function deleteTabMachine(where, why, send) {
   );
 }
 
+// Deleting a remote tab's machine takes the four digits the daemon issued for
+// that tab (see delete-codes.js); the page shows them and the user types them.
+// `key` names the tab: `w:<window id>` or `saved:<dotted tab id>`.
+const deleteKey = (msg) => (isWindowId(msg.w) ? `w:${msg.w}` : typeof msg.id === 'string' ? `saved:${msg.id}` : null);
+
+// The remote a delete request names, or null: a live window's, or a dotted tab's.
+function remoteOfTarget(msg, cb) {
+  if (isWindowId(msg.w)) {
+    execFile(TMUX_BIN, tmuxArgs('display', '-p', '-t', msg.w, REMOTE_FORMAT), (err, out) => {
+      if (err) return cb(null);
+      cb(parseRemote(out.trim()) ?? null);
+    });
+  } else {
+    cb(allSaved().find((e) => e.id === msg.id)?.remote ?? null);
+  }
+}
+
+// The page asked for a delete's code: issued for a remote tab only.
+function answerDeleteCode(msg, send) {
+  const key = deleteKey(msg);
+  if (!key) return;
+  remoteOfTarget(msg, (where) => {
+    if (!where) return send({ t: 'delete-code', key, code: null });
+    send({ t: 'delete-code', key, code: issueDeleteCode(key) });
+  });
+}
+
+// True when a delete for `key` may go ahead; otherwise says why not.
+function deleteConfirmed(key, code, send) {
+  if (takeDeleteCode(key, code)) return true;
+  send({ t: 'notice', text: 'Not deleted: the four digits were wrong or came too late. Ask again for a new code.', kind: 'bad' });
+  return false;
+}
+
+// Drop a saved (dotted) tab for good; a remote one's machine goes with it,
+// once its code is confirmed.
+function forgetSaved(session, id, code, send) {
+  const known = allSaved().find((e) => e.id === id);
+  if (known?.remote && !deleteConfirmed(`saved:${id}`, code, send)) return;
+  const entry = takeSaved(session, id);
+  if (entry?.remote) deleteTabMachine(entry.remote, 'Delete on its dotted tab (code confirmed)', send);
+}
+
 // The remotes for the page; none while ~/.dtmux.yaml is invalid.
 function remotesForPage() {
   try {
@@ -242,7 +286,8 @@ export function attachTmuxSession(ws, opts) {
       else if (msg.t === 'resume' && typeof msg.id === 'string') {
         const entry = takeSaved(session, msg.id);
         if (entry) start(entry);
-      } else if ((msg.t === 'forget' || msg.t === 'delete-remote') && typeof msg.id === 'string') forgetSaved(msg.id);
+      } else if (msg.t === 'delete-code') answerDeleteCode(msg, send);
+      else if ((msg.t === 'forget' || msg.t === 'delete-remote') && typeof msg.id === 'string') forgetSaved(session, msg.id, msg.code, send);
       else if (msg.t === 'stop') onStop();
       else if (msg.t === 'restart') onRestart();
       else if (msg.t === 'soft-restart') onSoftRestart();
@@ -651,13 +696,16 @@ function bridge(ws, opts) {
             windowInfo(tmux, msg.w, (err, list) => !err && send({ t: 'info', w: msg.w, panes: list, upSince: Number(up?.[0]) || null })),
           );
         break;
+      case 'delete-code':
+        answerDeleteCode(msg, send);
+        break;
       case 'forget':
       case 'delete-remote':
-        if (isWindowId(msg.w)) closeWindow(msg.w);
-        else if (typeof msg.id === 'string') forgetSaved(msg.id);
+        if (isWindowId(msg.w)) closeWindow(msg.w, msg.code);
+        else if (typeof msg.id === 'string') forgetSaved(session, msg.id, msg.code, send);
         break;
       case 'close':
-        if (isWindowId(msg.w)) closeWindow(msg.w);
+        if (isWindowId(msg.w)) closeWindow(msg.w, msg.code);
         break;
       case 'stop':
         onStop();
@@ -774,26 +822,22 @@ function bridge(ws, opts) {
     });
   }
 
-  // Drop a saved (dotted) tab for good; a remote one's machine goes with it.
-  function forgetSaved(id) {
-    const entry = takeSaved(session, id);
-    if (entry?.remote) deleteTabMachine(entry.remote, 'Delete on its dotted tab (code typed)', send);
-  }
-
   // Close a window for good: no dotted tab. From outside the window, so a
   // stuck one (a frozen ssh, say) closes too. A remote tab closed for good
   // takes its machine with it (Disconnect is the way to keep the machine):
   // nothing would ever join it again, and it would run on, maybe at a cost.
-  function closeWindow(w) {
+  // That needs the code issued for the window (see delete-codes.js).
+  function closeWindow(w, code) {
     tmux.run(`display -p -t ${w} ${quote(`#{window_id}\t${REMOTE_FORMAT}`)}`, (err, lines) => {
       if (err || !lines[0]) return;
       const [id, remoteVal] = lines[0].split('\t');
       if (id !== w) return; // tmux fell back to another window: not ours to close
       const where = parseRemote(remoteVal);
+      if (where && !deleteConfirmed(`w:${w}`, code, send)) return;
       execFile(TMUX_BIN, tmuxArgs('kill-window', '-t', w), (e, _o, stderr) => {
         if (e && !/can't find window/.test(stderr)) send({ t: 'notice', text: `Could not close the window: ${stderr.trim() || e.message}`, kind: 'bad' });
       });
-      if (where) deleteTabMachine(where, 'Delete on its tab (code typed)', send);
+      if (where) deleteTabMachine(where, 'Delete on its tab (code confirmed)', send);
     });
   }
 
