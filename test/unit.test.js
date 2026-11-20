@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { decodeOutput, quote } from '../server/tmux-control.js';
 import { trackKitty, kittyRestoreSequence, recordKittyCommand, forgetPane } from '../server/kitty-tracker.js';
-import { followTmuxOrder, macLineEdit, macWordEdit, orderTabs, parseLayout, paneBorders, tmuxKeyName, windowSwitchDirection } from '../public/tmux-util.js';
+import { followTmuxOrder, macLineEdit, macWordEdit, orderTabs, parseLayout, paneBorders, tabStripDelta, tmuxKeyName, windowSwitchDirection } from '../public/tmux-util.js';
 import { tokenize, parseBinding, fillTemplate } from '../server/tmux-bindings.js';
 import { findResumeHint } from '../server/resume-hint.js';
 import { planSwaps } from '../server/tmux-session.js';
@@ -230,6 +230,16 @@ test('fillTemplate follows tmux: first %% and every %N, %%% escapes quotes', () 
   assert.equal(fillTemplate('a %% b %%', ['x']), 'a x b %%');
   assert.equal(fillTemplate('a %1 %2 %1', ['x', 'y']), 'a x y x');
   assert.equal(fillTemplate('a "%%%"', ['q"$']), 'a "q\\"\\$"');
+});
+
+test('the mouse wheel over the tabs scrolls them sideways', () => {
+  assert.equal(tabStripDelta({ deltaX: 0, deltaY: 120, deltaMode: 0 }, 400), 120);
+  assert.equal(tabStripDelta({ deltaX: 0, deltaY: -40, deltaMode: 0 }, 400), -40);
+  assert.equal(tabStripDelta({ deltaX: 3, deltaY: 0, deltaMode: 0 }, 400), 3, 'a sideways gesture still moves the strip');
+  assert.equal(tabStripDelta({ deltaX: 2, deltaY: 5, deltaMode: 0 }, 400), 7);
+  assert.equal(tabStripDelta({ deltaY: 2, deltaMode: 1 }, 400), 32, 'a notch in lines');
+  assert.equal(tabStripDelta({ deltaY: 1, deltaMode: 2 }, 400), 400, 'a page is the strip width');
+  assert.equal(tabStripDelta({ deltaX: 0, deltaY: 0, deltaMode: 0 }, 400), 0);
 });
 
 test('orderTabs keeps the remembered order, puts new tabs last, and remembers absent ones', () => {

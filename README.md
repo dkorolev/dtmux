@@ -336,7 +336,8 @@ in-memory daemon state that is not in tmux, on disk, or in the hand-over.
   across later restarts. A live window that looks exactly like a saved one
   (same name, directory and naming) takes its place, so the shell tmux opens
   to start a session does not pile up copies.
-- Tabs, dotted ones included, can be dragged to reorder them. The order is
+- Tabs, dotted ones included, can be dragged to reorder them. The mouse
+  wheel over the strip scrolls them sideways. The order is
   remembered in the browser, and tmux renumbers its windows to match, so
   prefix + digit follows the tabs. A tapped dotted tab opens in its own slot,
   and tabs stay put while the page reconnects or dtmux restarts.
