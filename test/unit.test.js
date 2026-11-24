@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { decodeOutput, quote } from '../server/tmux-control.js';
 import { trackKitty, kittyRestoreSequence, recordKittyCommand, forgetPane } from '../server/kitty-tracker.js';
-import { followTmuxOrder, macLineEdit, macWordEdit, orderTabs, parseLayout, paneBorders, tabStripDelta, tmuxKeyName, windowSwitchDirection } from '../public/tmux-util.js';
+import { macLineEdit, macWordEdit, orderTabs, parseLayout, paneBorders, tabStripDelta, tmuxKeyName, windowSwitchDirection } from '../public/tmux-util.js';
 import { tokenize, parseBinding, fillTemplate } from '../server/tmux-bindings.js';
 import { findResumeHint } from '../server/resume-hint.js';
 import { planSwaps } from '../server/tmux-session.js';
@@ -425,18 +425,6 @@ test('a remote tab runs the helper, creating only when asked', () => {
   assert.match(join, /DTMUX_CONFIG=\S+ DTMUX_STATE_DIR=\S+ exec \S+ \S+dtmux-remote\.js lunanode dtmux-1a2b3c4d$/);
   assert.match(remoteCommand({ name: 'lunanode', host: 'h' }, { create: true }), / lunanode h --new$/);
   assert.match(remoteCommand({ name: 'lunanode', host: 'h', address: '2602:ffb6::1', upSince: 1793695053 }), / lunanode h --addr 2602:ffb6::1 --up 1793695053$/);
-});
-
-test("followTmuxOrder gives live tabs tmux's order and leaves dotted ones in place", () => {
-  const windows = [
-    { id: '@1', uid: 'a', index: 2 },
-    { id: '@2', uid: 'b', index: 0 },
-    { id: '@3', uid: 'c', index: 1 },
-    { id: '@4', uid: 'new', index: 3 },
-  ];
-  // a, b, c are live; "saved" is a dotted tab; "new" is not in the order yet.
-  assert.deepEqual(followTmuxOrder(['a', 'saved', 'b', 'c'], windows), ['b', 'saved', 'c', 'a']);
-  assert.deepEqual(followTmuxOrder([], windows), []);
 });
 
 test('remoteAction: pane commands of prefix bindings', () => {

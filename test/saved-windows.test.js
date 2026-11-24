@@ -3,9 +3,10 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { orderTabs } from '../public/tmux-util.js';
 
 process.env.DTMUX_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'dtmux-saved-'));
-const { saveOnStop, savedFor, takeSaved, addSaved, SAVED_FILE } = await import('../server/saved-windows.js');
+const { saveOnStop, savedFor, takeSaved, addSaved, saveTabOrder, tabOrderFor, SAVED_FILE } = await import('../server/saved-windows.js');
 
 const live = (session, index, id, name, dir, autoName = false) => ({ session, index, id, name, dir, autoName });
 
@@ -104,4 +105,25 @@ test('a window of several panes keeps each pane and its layout', async () => {
   assert.equal(savedFor('panes')[1].panes, undefined, 'a bad layout keeps the window as one pane');
   addSaved('panes', { id: 'p3', name: 'remote', dir: '/', remote: { name: 'h', host: 'x' }, ...kept });
   assert.equal(savedFor('panes')[2].panes, undefined, 'a remote tab has one pane here');
+});
+
+test('the toolbar restores mixed tab order from disk and appends newly recovered windows', async () => {
+  const session = 'ordered';
+  addSaved(session, { id: 'remote', name: 'worker', dir: '/tmp', remote: { name: 'cloud', host: 'worker' } });
+  saveTabOrder(session, ['b', 'remote', 'a']);
+  saveOnStop([
+    live(session, 0, 'a', 'first', '/tmp'),
+    live(session, 1, 'b', 'second', '/tmp'),
+    live(session, 2, 'recovered', 'recovered', '/tmp'),
+  ]);
+
+  const restored = await import('../server/saved-windows.js?reload-tab-order');
+  assert.deepEqual(restored.tabOrderFor(session), ['b', 'remote', 'a']);
+  assert.equal(restored.tabOrderFor('other'), null);
+  const items = restored.savedFor(session).map((w) => ({ key: w.id, w }));
+  const { tabs, order } = orderTabs(restored.tabOrderFor(session), items);
+  assert.deepEqual(order, ['b', 'remote', 'a', 'recovered']);
+  assert.deepEqual(tabs.map((tab) => tab.key), order);
+  assert.equal(tabs[1].w.remote.host, 'worker');
+  assert.deepEqual(tabOrderFor(session), ['b', 'remote', 'a']);
 });

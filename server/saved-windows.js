@@ -8,7 +8,8 @@
 //
 // ~/.dtmux/saved-windows.json:
 //   { "version": 1, "savedAt": ISO time,
-//     "sessions": { "<session>": [ { id, name, autoName, dir, branch?, agent?, remote? }, ... ] } }
+//     "sessions": { "<session>": [ { id, name, autoName, dir, branch?, agent?, remote? }, ... ] },
+//     "tabOrders": { "<session>": [ "<window id>", ... ] } }
 // `branch`: the git branch `dir` was on. `agent`: { name, command }, the coding
 // agent that ran there and the command that resumes it (see agent-close.js).
 // `remote`: { name, host, address?, upSince? }, for a tab on a remote VM (see remotes.js).
@@ -60,6 +61,10 @@ function clean({ id, name, autoName, dir, branch, agent, remote, panes, layout, 
   return e;
 }
 
+const validOrder = (order) =>
+  Array.isArray(order) && order.length <= 10_000 && order.every((id) => typeof id === 'string' && id.length > 0 && id.length <= 128);
+const tabOrders = new Map();
+
 function load() {
   try {
     const data = JSON.parse(fs.readFileSync(SAVED_FILE, 'utf8'));
@@ -67,6 +72,9 @@ function load() {
     for (const [session, list] of Object.entries(data?.sessions ?? {})) {
       const good = Array.isArray(list) ? list.filter(isEntry) : [];
       if (good.length) out.set(session, good.map(clean));
+    }
+    for (const [session, order] of Object.entries(data?.tabOrders ?? {})) {
+      if (validOrder(order)) tabOrders.set(session, [...new Set(order)]);
     }
     return out;
   } catch {
@@ -76,12 +84,24 @@ function load() {
 
 let saved = load();
 
-function persist() {
+function persist(orders = tabOrders) {
   fs.mkdirSync(STATE_DIR, { recursive: true });
-  const body = { version: 1, savedAt: new Date().toISOString(), sessions: Object.fromEntries(saved) };
+  const body = { version: 1, savedAt: new Date().toISOString(), sessions: Object.fromEntries(saved), tabOrders: Object.fromEntries(orders) };
   const tmp = `${SAVED_FILE}.${process.pid}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(body, null, 2) + '\n');
   fs.renameSync(tmp, SAVED_FILE);
+}
+
+// The toolbar order includes both live and saved window IDs.
+export const tabOrderFor = (session) => tabOrders.get(session) ?? null;
+
+export function saveTabOrder(session, order) {
+  if (!validOrder(order)) return;
+  const next = [...new Set(order)];
+  const previous = tabOrders.get(session);
+  if (previous?.length === next.length && next.every((id, i) => id === previous[i])) return;
+  persist(new Map(tabOrders).set(session, next));
+  tabOrders.set(session, next);
 }
 
 // Every saved window of every session.

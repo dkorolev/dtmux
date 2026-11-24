@@ -319,7 +319,7 @@ a fresh tmux server environment). Three things keep it that way:
 
 - The page reloads itself when it reconnects to a daemon serving different
   page files (`build`, a fingerprint of `public/`, in `hello` and `idle`).
-  Nothing is lost: everything lives in tmux, the tab order in localStorage.
+  tmux keeps the running windows, and dtmux saves the toolbar order on disk.
 - `dtmux restart` works whatever the running daemon's code. It sends
   SIGUSR2, which asks for a soft restart; a daemon from before soft
   restarts dies of it instead, and one that does not hand over in 5 s is
@@ -341,7 +341,8 @@ in-memory daemon state that is not in tmux, on disk, or in the hand-over.
   to start a session does not pile up copies.
 - Tabs, dotted ones included, can be dragged to reorder them. The mouse
   wheel over the strip scrolls them sideways. The order is
-  remembered in the browser, and tmux renumbers its windows to match, so
+  saved by dtmux for each session, including dotted remote tabs, and follows
+  the session across browsers. tmux renumbers its live windows to match, so
   prefix + digit follows the tabs. A tapped dotted tab opens in its own slot,
   and tabs stay put while the page reconnects or dtmux restarts.
 - Right-click a tab for its menu. On a live tab, Disconnect saves the window
