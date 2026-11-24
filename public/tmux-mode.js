@@ -10,7 +10,7 @@
 import { createTerminal, leaveQueriesToTmux, base64ToBytes, socketUrl, DEFAULT_TEXT_SIZE, TEXT_SIZE_MIN, TEXT_SIZE_MAX, textSize, saveTextSize } from './terminal-common.js';
 import { attachImagePaste, fileToMessage, flashPastedImage } from './paste-image.js';
 import { makePanels } from './panels.js';
-import { followTmuxOrder, orderTabs, parseLayout, paneBorders, tmuxKeyName, windowSwitchDirection } from './tmux-util.js';
+import { orderTabs, parseLayout, paneBorders, tmuxKeyName, windowSwitchDirection } from './tmux-util.js';
 
 export function startTmuxMode({ container, toolbar, params }) {
   const stage = document.createElement('div');
@@ -35,7 +35,7 @@ export function startTmuxMode({ container, toolbar, params }) {
   // (dotted until tapped, which reopens them). A tapped one is pending until
   // its window shows up, and keeps its place meanwhile. Tabs are keyed by the
   // window's long id, which a saved window keeps when reopened, and ordered by
-  // `tabOrder`: the user's drag-and-drop order, remembered in this browser.
+  // `tabOrder`: the user's drag-and-drop order, persisted by the daemon.
   let liveWindows = [];
   let savedWindows = [];
   let remotes = []; // [{ name, label, color, noun, lifetime, paid, plan }] from ~/.dtmux.yaml
@@ -43,7 +43,10 @@ export function startTmuxMode({ container, toolbar, params }) {
   let haveState = false; // false while (re)connecting: the old tabs stay put, dimmed
   let draggingTab = false;
   const ORDER_KEY = `dtmux.tabOrder.${params.get('session') || ''}`;
-  let tabOrder = loadOrder();
+  let tabOrder = [];
+  let receivedOrder = false;
+  let seedOrder = false;
+  let syncLiveOrder = false;
   const tabEls = new Map(); // key -> button
   const tabInfo = new Map(); // window id -> { panes, at }: the tooltip's facts, fetched on hover
   const closingTabs = new Set(); // keys of tabs being disconnected (their agent is asked to quit first)
@@ -162,6 +165,12 @@ export function startTmuxMode({ container, toolbar, params }) {
           break;
         case 'saved':
           savedWindows = Array.isArray(msg.windows) ? msg.windows : [];
+          if ('order' in msg) {
+            receivedOrder = true;
+            syncLiveOrder = true;
+            seedOrder = msg.order === null;
+            tabOrder = msg.order ?? loadLegacyOrder();
+          }
           renderTabs();
           break;
         case 'taken':
@@ -183,7 +192,7 @@ export function startTmuxMode({ container, toolbar, params }) {
 
   // The files on disk changed since this page loaded them (a soft restart to
   // new code, or just an edit): load them. Nothing is lost, since everything
-  // lives in tmux and the tab order in localStorage. At most once in 10 s, so
+  // lives in tmux and the daemon saves the tab order. At most once in 10 s, so
   // files still being written cannot make it loop.
   function reloadIfStale(build) {
     const mine = document.getElementById('status').dataset.build;
@@ -363,6 +372,7 @@ export function startTmuxMode({ container, toolbar, params }) {
     for (const el of stage.querySelectorAll('.tmux-notice, .tmux-journal')) el.remove();
     // The tabs stay, dimmed, until the next state replaces them in place.
     haveState = false;
+    receivedOrder = false;
     toolbar.tabs.classList.add('offline');
     liveWindows = [];
     savedWindows = [];
@@ -555,16 +565,6 @@ export function startTmuxMode({ container, toolbar, params }) {
     const win = windows.find((w) => w.active);
     const pane = win && list.find((p) => p.window === win.id && p.active);
     for (const info of list) panes.get(info.id)?.el.classList.toggle('active', info.active);
-    // The first state after (re)connecting: tmux's window order is the one
-    // the last page left, maybe in another browser; live tabs take it, dotted
-    // tabs keep their places in this browser's order.
-    if (!haveState) {
-      const next = followTmuxOrder(tabOrder, windows);
-      if (next.join() !== tabOrder.join()) {
-        tabOrder = next;
-        saveOrder();
-      }
-    }
     liveWindows = windows;
     haveState = true;
     stage.classList.remove('stale');
@@ -714,7 +714,7 @@ export function startTmuxMode({ container, toolbar, params }) {
     document.addEventListener('mouseup', up, true);
   }
 
-  function loadOrder() {
+  function loadLegacyOrder() {
     try {
       const v = JSON.parse(localStorage.getItem(ORDER_KEY));
       return Array.isArray(v) ? v.filter((k) => typeof k === 'string') : [];
@@ -723,16 +723,8 @@ export function startTmuxMode({ container, toolbar, params }) {
     }
   }
   function saveOrder() {
-    try {
-      localStorage.setItem(ORDER_KEY, JSON.stringify(tabOrder));
-    } catch {}
+    send({ t: 'tab-order', order: tabOrder });
   }
-  // Another page of this browser reordered the tabs.
-  window.addEventListener('storage', (e) => {
-    if (e.key !== ORDER_KEY) return;
-    tabOrder = loadOrder();
-    renderTabs();
-  });
 
   // Every tab, in toolbar order: { key, kind: 'live' | 'saved' | 'pending', w }.
   function currentTabs() {
@@ -745,7 +737,8 @@ export function startTmuxMode({ container, toolbar, params }) {
       ...[...pending].filter(([uid]) => !saved.has(uid)).map(([uid, w]) => ({ key: uid, kind: 'pending', w })),
     ];
     const { tabs, order } = orderTabs(tabOrder, items);
-    if (order.length !== tabOrder.length) {
+    if ((seedOrder && tabs.length) || order.length !== tabOrder.length || order.some((id, i) => id !== tabOrder[i])) {
+      seedOrder = false;
       tabOrder = order;
       saveOrder();
     }
@@ -778,7 +771,7 @@ export function startTmuxMode({ container, toolbar, params }) {
   }
 
   function renderTabs() {
-    if (!haveState || draggingTab) return;
+    if (!haveState || !receivedOrder || draggingTab) return;
     toolbar.tabs.classList.remove('offline');
     const tabs = currentTabs();
     const landed = tabs.some((t) => t.kind === 'live' && tabItems.get(t.key)?.kind === 'pending');
@@ -828,8 +821,11 @@ export function startTmuxMode({ container, toolbar, params }) {
       shownActive = active;
       if (active && !clicked(active)) revealTab(tabEls.get(active));
     } else if (fresh && !clicked(fresh)) revealTab(tabEls.get(fresh));
-    // A reopened window joins tmux's list last; move it to its tab's place.
-    if (landed) syncTmuxOrder();
+    // The first live state and reopened windows may differ from the saved order.
+    if (liveWindows.length && (syncLiveOrder || landed)) {
+      syncLiveOrder = false;
+      syncTmuxOrder();
+    }
   }
 
   // The tooltip of a live tab: per pane, where it is, how long it has been

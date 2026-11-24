@@ -20,7 +20,7 @@
 //                                         with `p`, about that pane's tab (shown on it)
 //   journal { p, agent, command, dir, branch, commit, dirty }
 //                                         a resume command showed up on a pane
-//   saved  { windows: [{ id, name, dir, branch, agent, remote }] }
+//   saved  { windows: [{ id, name, dir, branch, agent, remote }], order? }
 //                                         windows saved when dtmux last stopped
 //   taken  {}                             a newer page took this session; this
 //                                         socket closes (code 4001) right after
@@ -37,6 +37,7 @@
 //   new-remote { name }    a new tab on a new VM of that remote (see remotes.js)
 //   resize-pane { p, axis, size }  drag a border; axis "x" (width) or "y" (height)
 //   resume { id }          reopen a saved window: same name, same directory
+//   tab-order { order }    persist the toolbar order (live and saved window IDs)
 //   reorder { ws }         put tmux's windows in this order (window ids, a tab drag)
 //   info { w }             what the tab's tooltip shows, answered with
 //                          info { w, panes: [{ id, active, dir, openSecs, running }], upSince }
@@ -62,7 +63,7 @@ import { findResumeHint } from './resume-hint.js';
 import { windowInfo } from './pane-info.js';
 import { closeAgents } from './agent-close.js';
 import { branchOf, restoreBranch } from './git-branch.js';
-import { savedFor, allSaved, takeSaved, addSaved, renameSaved, savedEvents, newWindowId, ID_OPTION } from './saved-windows.js';
+import { savedFor, allSaved, takeSaved, addSaved, renameSaved, savedEvents, newWindowId, ID_OPTION, tabOrderFor, saveTabOrder } from './saved-windows.js';
 import { issueDeleteCode, takeDeleteCode } from './delete-codes.js';
 import { REMOTE_OPTION, REMOTE_UP_OPTION, REMOTE_FORMAT, REMOTE_SUBSCRIPTION, parseRemote, remoteValue, currentRemotes, newHost, remoteCommand } from './remotes.js';
 import { pageRemotes } from './remote-config.js';
@@ -237,6 +238,19 @@ function openDirs() {
 const isPaneId = (s) => typeof s === 'string' && /^%\d+$/.test(s);
 const isWindowId = (s) => typeof s === 'string' && /^@\d+$/.test(s);
 
+function sendSavedWindows(session, send, initial) {
+  const windows = savedFor(session).map(pageEntry);
+  send(initial ? { t: 'saved', windows, order: tabOrderFor(session) } : { t: 'saved', windows });
+}
+
+function storeTabOrder(session, order, send) {
+  try {
+    saveTabOrder(session, order);
+  } catch (err) {
+    send({ t: 'notice', text: `Could not save tab order: ${err.message}`, kind: 'bad' });
+  }
+}
+
 // A page connects. If its session is gone but windows were saved for it,
 // start nothing: show the saved windows and let the page pick one to start
 // the session with, or ask for an empty session.
@@ -246,9 +260,7 @@ export function attachTmuxSession(ws, opts) {
   exists((yes) => {
     if (yes || !savedFor(session).length) return bridge(ws, opts);
     const send = (msg) => ws.readyState === ws.OPEN && ws.send(JSON.stringify(msg));
-    const sendSaved = () =>
-      send({ t: 'saved', windows: savedFor(session).map(pageEntry) });
-    const onSavedChange = (s) => s === session && sendSaved();
+    const onSavedChange = (s) => s === session && sendSavedWindows(session, send);
     let { cols, rows } = opts;
     let starting = false;
     const more = []; // saved windows tapped while the session was starting
@@ -282,7 +294,8 @@ export function attachTmuxSession(ws, opts) {
       if (msg.t === 'size' && msg.cols > 1 && msg.rows > 1 && msg.cols < 2000 && msg.rows < 1000) {
         cols = Math.trunc(msg.cols);
         rows = Math.trunc(msg.rows);
-      } else if (msg.t === 'new-session') start(null);
+      } else if (msg.t === 'tab-order') storeTabOrder(session, msg.order, send);
+      else if (msg.t === 'new-session') start(null);
       else if (msg.t === 'resume' && typeof msg.id === 'string') {
         const entry = takeSaved(session, msg.id);
         if (entry) start(entry);
@@ -295,7 +308,7 @@ export function attachTmuxSession(ws, opts) {
     ws.on('message', onMessage);
     ws.on('close', leave);
     savedEvents.on('change', onSavedChange);
-    sendSaved(); // ahead of idle, so the page draws the dotted tabs at once
+    sendSavedWindows(session, send, true); // ahead of idle, so the page draws the dotted tabs at once
     send({ t: 'idle', session, build: opts.build, remotes: remotesForPage() });
   });
 }
@@ -388,11 +401,9 @@ function bridge(ws, opts) {
     const [name, prefix] = lines[0].split('\t');
     clientName = name;
     send({ t: 'hello', session, prefix, commit, build, remotes: remotesForPage() });
-    sendSaved();
+    sendSavedWindows(session, send, true);
   });
-  const sendSaved = () =>
-    send({ t: 'saved', windows: savedFor(session).map(pageEntry) });
-  const onSavedChange = (s) => s === session && sendSaved();
+  const onSavedChange = (s) => s === session && sendSavedWindows(session, send);
   savedEvents.on('change', onSavedChange);
   const onContainer = (status) => send({ t: 'container', status });
   containerEvents.on('change', onContainer);
@@ -683,6 +694,9 @@ function bridge(ws, opts) {
         break;
       case 'resume':
         if (typeof msg.id === 'string') resumeSaved(msg.id);
+        break;
+      case 'tab-order':
+        storeTabOrder(session, msg.order, send);
         break;
       case 'reorder':
         if (Array.isArray(msg.ws) && msg.ws.length < 1000 && msg.ws.every(isWindowId)) reorder(msg.ws);
