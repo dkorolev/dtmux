@@ -345,6 +345,12 @@ in-memory daemon state that is not in tmux, on disk, or in the hand-over.
   the session across browsers. tmux renumbers its live windows to match, so
   prefix + digit follows the tabs. A tapped dotted tab opens in its own slot,
   and tabs stay put while the page reconnects or dtmux restarts.
+- Right-click **+** and choose **Watch remote tmux…** to open a green,
+  read-only tab for an existing tmux session. Paste a command such as
+  `ssh -t my-host 'tmux attach -r -t work'`, or enter `my-host/work`.
+  The host must already be trusted and reachable with non-interactive SSH. Closing or disconnecting the watcher
+  leaves the remote session running. A disconnected watcher keeps its slot
+  as a dotted tab and can be reopened with a click.
 - Right-click a tab for its menu. On a live tab, Disconnect saves the window
   (name, directory, id) and closes it, so it turns dotted in place; tapping
   it starts it again. Disconnecting the last window leaves the page showing

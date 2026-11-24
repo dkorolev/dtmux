@@ -19,6 +19,7 @@ import { sessionPanes } from './pane-info.js';
 import { resumeCommand } from './agent-resume.js';
 import { branchOf } from './git-branch.js';
 import { REMOTE_FORMAT, parseRemote } from './remotes.js';
+import { WATCH_FORMAT, parseWatch } from './tmux-watch.js';
 import { listPanes, panesOf, windowAgent } from './window-panes.js';
 
 export const SNAPSHOT_FILE = path.join(STATE_DIR, 'live-windows.json');
@@ -31,6 +32,7 @@ export const LIVE_FORMAT = [
   '#{window_id}',
   '#{pane_current_path}',
   REMOTE_FORMAT,
+  WATCH_FORMAT,
   '#{window_name}',
 ].join('\t');
 
@@ -42,22 +44,24 @@ export function parseLive(out, agents = new Map(), windows = new Map()) {
     .split('\n')
     .filter(Boolean)
     .map((line) => {
-      const [session, index, id, auto, windowId, paneDir, remote, ...name] = line.split('\t');
+      const [session, index, id, auto, windowId, paneDir, remote, watchVal, ...name] = line.split('\t');
       const where = parseRemote(remote);
       const win = windows.get(windowId) ?? { panes: [...agents.values()].filter((a) => a.window === windowId).map((a) => ({ id: a.pane, active: a.active })) };
       const agent = windowAgent(win, agents);
       const dir = agent?.dir || paneDir;
+      const watch = parseWatch(watchVal);
       return {
         session,
         index: Number(index),
         id,
         autoName: auto === '1',
         dir,
-        branch: where ? null : branchOf(dir),
+        branch: where || watch ? null : branchOf(dir),
         agent: agent?.command ? { name: agent.agent, command: agent.command } : null,
         remote: where,
+        watch,
         name: name.join('\t'),
-        ...(where ? {} : panesOf(windows.get(windowId), agents)),
+        ...(where || watch ? {} : panesOf(windows.get(windowId), agents)),
       };
     });
 }

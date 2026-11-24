@@ -7,7 +7,26 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { paneInputCommand } from '../server/tmux-session.js';
 
-test('connection-time interrupts are dropped and both keys reach the attached terminal', {
+test('watcher accepts a pasted SSH attach command or target shorthand', async () => {
+  const { parseWatchInput } = await import('../server/tmux-watch.js');
+  const target = { host: 'dima.personal', session: 'scrape-lane1' };
+  for (const input of [
+    "ssh -t dima.personal 'tmux attach -r -t scrape-lane1'",
+    'ssh -tt dima.personal "tmux attach-session -rt =scrape-lane1"',
+    'ssh dima.personal tmux a -t scrape-lane1 -r',
+    'dima.personal/scrape-lane1',
+    'dima.personal scrape-lane1',
+  ]) assert.deepEqual(parseWatchInput(input), target);
+  for (const input of [
+    "ssh -t dima.personal 'tmux attach -t scrape-lane1; id'",
+    "ssh -t dima.personal 'tmux attach -d -t scrape-lane1'",
+    "ssh -t dima.personal 'tmux attach -t $(id)'",
+    "ssh -t dima.personal 'tmux attach -t scrape-lane1 -t other'",
+    'dima.personal',
+  ]) assert.equal(parseWatchInput(input), null);
+});
+
+test('connecting remotes drop interrupts and read-only watchers drop all input', {
   skip: spawnSync('tmux', ['-V']).status !== 0,
 }, async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dtmux-input-'));
@@ -47,6 +66,15 @@ exec cat > "$FIXTURE/input"
     press(4);
     await waitFor(() => fs.statSync(path.join(dir, 'input')).size >= 2);
     assert.deepEqual(fs.readFileSync(path.join(dir, 'input')), Buffer.from([3, 4]));
+
+    tmux('set-option', '-w', '-t', pane, '@dtmux_watch', 'example.invalid/observed');
+    press(3);
+    press(4);
+    press(65);
+    tmux('set-option', '-wu', '-t', pane, '@dtmux_watch');
+    press(66);
+    await waitFor(() => fs.readFileSync(path.join(dir, 'input')).includes(66));
+    assert.deepEqual(fs.readFileSync(path.join(dir, 'input')), Buffer.from([3, 4, 66]));
   } finally {
     spawnSync('tmux', ['-S', socket, 'kill-server']);
     fs.rmSync(dir, { recursive: true, force: true });

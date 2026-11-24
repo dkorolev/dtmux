@@ -34,6 +34,7 @@
 //   keys   { keys }         tmux key names routed through tmux key bindings
 //   answer { id, values }   the reply to a prompt; values null when cancelled
 //   select-window { w }, select-pane { p }, new-window, open { url }
+//   new-watch { target }  watch an existing tmux session over SSH
 //   new-remote { name }    a new tab on a new VM of that remote (see remotes.js)
 //   resize-pane { p, axis, size }  drag a border; axis "x" (width) or "y" (height)
 //   resume { id }          reopen a saved window: same name, same directory
@@ -67,6 +68,7 @@ import { savedFor, allSaved, takeSaved, addSaved, renameSaved, savedEvents, newW
 import { issueDeleteCode, takeDeleteCode } from './delete-codes.js';
 import { REMOTE_OPTION, REMOTE_UP_OPTION, REMOTE_FORMAT, REMOTE_SUBSCRIPTION, parseRemote, remoteValue, currentRemotes, newHost, remoteCommand } from './remotes.js';
 import { pageRemotes } from './remote-config.js';
+import { WATCH_FORMAT, WATCH_OPTION, parseWatch, parseWatchInput, watchCommand, watchTarget, watchValue } from './tmux-watch.js';
 import { SPLIT_HOOK, remoteAction, actionKeys } from './remote-keys.js';
 import { listPanes, agentsByPane, panesOf, windowAgent } from './window-panes.js';
 import { events as containerEvents, containerStatus, ensureImage } from './gh-check.js';
@@ -86,6 +88,7 @@ const WINDOW_FORMAT = [
   '#{window_visible_layout}',
   `#{${ID_OPTION}}`,
   REMOTE_FORMAT,
+  WATCH_FORMAT,
   '#{window_name}',
 ].join('\t');
 const PANE_FORMAT = [
@@ -136,13 +139,14 @@ const MODE_NOTICES = {
 const UNWEDGE_KEYS = ['Escape', 'C-c', 'Escape', 'C-c'];
 
 // What a page sees of a saved window.
-const pageEntry = ({ id, name, dir, branch, agent, remote }) => ({
+const pageEntry = ({ id, name, dir, branch, agent, remote, watch }) => ({
   id,
   name,
   dir,
   branch: branch ?? null,
   agent: agent ?? null,
   remote: remote ?? null,
+  watch: watch ?? null,
 });
 
 // Delete a remote tab's machine for good, the page having asked (`why`, for
@@ -251,6 +255,17 @@ function storeTabOrder(session, order, send) {
   }
 }
 
+function newWatch({ target, host, session }, send) {
+  const watch = target === undefined ? watchTarget(host, session) : parseWatchInput(target);
+  if (watch) return { id: newWindowId(), name: watchValue(watch), dir: os.homedir(), watch };
+  send({ t: 'notice', text: "Enter host/session or an SSH command like ssh -t host 'tmux attach -r -t session'.", kind: 'bad' });
+  return null;
+}
+
+function watchOptions(watch) {
+  return [`set-option -w ${WATCH_OPTION} ${quote(watchValue(watch))}`, 'set-option -w remain-on-exit on'];
+}
+
 // A page connects. If its session is gone but windows were saved for it,
 // start nothing: show the saved windows and let the page pick one to start
 // the session with, or ask for an empty session.
@@ -296,7 +311,10 @@ export function attachTmuxSession(ws, opts) {
         rows = Math.trunc(msg.rows);
       } else if (msg.t === 'tab-order') storeTabOrder(session, msg.order, send);
       else if (msg.t === 'new-session') start(null);
-      else if (msg.t === 'resume' && typeof msg.id === 'string') {
+      else if (msg.t === 'new-watch') {
+        const entry = newWatch(msg, send);
+        if (entry) start(entry);
+      } else if (msg.t === 'resume' && typeof msg.id === 'string') {
         const entry = takeSaved(session, msg.id);
         if (entry) start(entry);
       } else if (msg.t === 'delete-code') answerDeleteCode(msg, send);
@@ -321,17 +339,19 @@ function bridge(ws, opts) {
   const firstRemote = first?.remote ?? null;
   // A saved window to start the session with: its first pane's directory
   // now, the rest of it (panes, notes, agents) once attached.
-  const firstPlan = first && !firstRemote ? planPanes(first) : null;
+  const firstWatch = first?.watch;
+  const firstPlan = first && !firstRemote && !firstWatch ? planPanes(first) : null;
   const tmux = new TmuxControl({
     session,
     cols,
     rows,
     cwd: firstPlan?.dirs[0] ?? os.homedir(),
-    windowName: first && (firstRemote || !first.autoName) ? first.name : null,
-    command: firstRemote ? remoteCommand(firstRemote) : null,
+    windowName: first && (firstRemote || firstWatch || !first.autoName) ? first.name : null,
+    command: firstRemote ? remoteCommand(firstRemote) : firstWatch ? watchCommand(firstWatch) : null,
   });
   // Ahead of every other command, so the first window keeps its saved id.
   if (first) tmux.run(`set-option -w ${ID_OPTION} ${quote(first.id)}`);
+  if (firstWatch) tmux.runList(watchOptions(firstWatch));
   if (firstRemote) tmux.runList([
     `set-option -w ${REMOTE_OPTION} ${quote(remoteValue(firstRemote))}`,
     'set-option -p @dtmux_connecting 1',
@@ -562,7 +582,7 @@ function bridge(ws, opts) {
     tmux.runList([`list-windows -F ${quote(WINDOW_FORMAT)}`, `list-panes -s -F ${quote(PANE_FORMAT)}`], ([w, p]) => {
       if (w.err || p.err) return;
       const windows = w.lines.filter(Boolean).map((l) => {
-        let [id, index, active, layout, uid, remote, ...name] = l.split('\t');
+        let [id, index, active, layout, uid, remote, watchVal, ...name] = l.split('\t');
         // Every window gets a long unique id the first time we see it, so a
         // saved window can be told apart from any other after a restart.
         if (!uid) {
@@ -570,7 +590,7 @@ function bridge(ws, opts) {
           tmux.run(`set-option -w -t ${id} ${ID_OPTION} ${uid}`);
         }
         const where = parseRemote(remote); // upSince: null while the VM is being made
-        return { id, uid, index: Number(index), active: active === '1', layout, remote: where, name: name.join('\t') };
+        return { id, uid, index: Number(index), active: active === '1', layout, remote: where, watch: parseWatch(watchVal), name: name.join('\t') };
       });
       const list = p.lines.filter(Boolean).map((l) => {
         const [id, window, active, width, height, cmd] = l.split('\t');
@@ -644,9 +664,12 @@ function bridge(ws, opts) {
           sendBytes(msg.p, Buffer.from(msg.d, msg.bin ? 'latin1' : 'utf8'));
         }
         break;
-      case 'paste-image':
-        if (isPaneId(msg.p) && panes.has(msg.p)) placePastedImage(msg);
+      case 'paste-image': {
+        const pane = view.panes.find((p) => p.id === msg.p);
+        const window = pane && view.windows.find((w) => w.id === pane.window);
+        if (window && !window.watch && panes.has(msg.p)) placePastedImage(msg);
         break;
+      }
       case 'size': {
         const c = Math.trunc(msg.cols);
         const r = Math.trunc(msg.rows);
@@ -686,6 +709,11 @@ function bridge(ws, opts) {
       case 'new-window':
         tmux.run('new-window -c "#{pane_current_path}"');
         break;
+      case 'new-watch': {
+        const entry = newWatch(msg, send);
+        if (entry) openSaved(entry);
+        break;
+      }
       case 'new-remote':
         if (typeof msg.name === 'string') newRemote(msg.name);
         break;
@@ -806,18 +834,19 @@ function bridge(ws, opts) {
   const closing = new Set();
   function disconnectWindow(w) {
     if (closing.has(w)) return;
-    const format = ['#{window_id}', `#{${ID_OPTION}}`, '#{automatic-rename}', '#{pane_current_path}', REMOTE_FORMAT, '#{window_name}'].join('\t');
+    const format = ['#{window_id}', `#{${ID_OPTION}}`, '#{automatic-rename}', '#{pane_current_path}', REMOTE_FORMAT, WATCH_FORMAT, '#{window_name}'].join('\t');
     tmux.run(`display -p -t ${w} ${quote(format)}`, async (err, lines) => {
       if (err || !lines[0]) return;
-      const [id, uid, auto, dir, remoteVal, ...name] = lines[0].split('\t');
+      const [id, uid, auto, dir, remoteVal, watchVal, ...name] = lines[0].split('\t');
       const remote = parseRemote(remoteVal);
+      const watch = parseWatch(watchVal);
       if (id !== w) return; // tmux fell back to another window: that one is not ours to close
       closing.add(w);
-      // On a VM the agents run there, in its own tmux: they keep running.
-      const agents = remote ? [] : await closeAgents(session, { target: w, log: (m) => console.log(`[${session}] ${m}`) });
+      // Programs in a remote tmux keep running after the local viewer closes.
+      const agents = remote || watch ? [] : await closeAgents(session, { target: w, log: (m) => console.log(`[${session}] ${m}`) });
       closing.delete(w);
       const byPane = agentsByPane(agents);
-      const win = remote ? null : (await listPanes(TMUX_BIN, tmuxArgs, w)).get(w);
+      const win = remote || watch ? null : (await listPanes(TMUX_BIN, tmuxArgs, w)).get(w);
       const agent = (win && windowAgent(win, byPane)) ?? agents.find((a) => a.active) ?? agents[0];
       const where = agent?.dir || dir;
       addSaved(session, {
@@ -826,9 +855,10 @@ function bridge(ws, opts) {
         name: name.join('\t'),
         autoName: auto === '1',
         dir: where,
-        branch: remote ? null : branchOf(where),
+        branch: remote || watch ? null : branchOf(where),
         agent: agent?.command ? { name: agent.agent, command: agent.command } : null,
         remote,
+        watch,
       });
       execFile(TMUX_BIN, tmuxArgs('kill-window', '-t', w), (e, _o, stderr) => {
         if (e && !/can't find window/.test(stderr)) send({ t: 'notice', text: `Could not close the window: ${stderr.trim() || e.message}`, kind: 'bad' });
@@ -868,6 +898,14 @@ function bridge(ws, opts) {
     if (entry) openSaved(entry);
   }
   function openSaved(entry) {
+    if (entry.watch) {
+      tmux.runList([
+        `new-window -n ${quote(entry.name)} ${quote(watchCommand(entry.watch))}`,
+        `set-option -w ${ID_OPTION} ${quote(entry.id)}`,
+        ...watchOptions(entry.watch),
+      ], ([made]) => made.err && send({ t: 'notice', text: `Could not open watcher: ${made.err.message}`, kind: 'bad' }));
+      return;
+    }
     if (entry.remote) return openRemote(entry.remote, entry.id, entry.name);
     const plan = planPanes(entry);
     const name = entry.autoName ? '' : ` -n ${quote(entry.name)}`;
@@ -1058,8 +1096,8 @@ export function paneInputCommand(id, bytes) {
   const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join(' ');
   const keys = `send-keys -H -t ${id} ${hex}`;
   if (bytes.length === 1 && (bytes[0] === 3 || bytes[0] === 4))
-    return `if-shell -F -t ${id} '#{!=:#{@dtmux_connecting},1}' ${quote(keys)}`;
-  return keys;
+    return `if-shell -F -t ${id} '#{&&:#{==:${WATCH_FORMAT},},#{!=:#{@dtmux_connecting},1}}' ${quote(keys)}`;
+  return `if-shell -F -t ${id} '#{==:${WATCH_FORMAT},}' ${quote(keys)}`;
 }
 
 // The swap-window pairs that put `current` windows ({ id, index }) into the
