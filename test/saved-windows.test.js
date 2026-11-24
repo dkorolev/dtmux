@@ -127,3 +127,13 @@ test('the toolbar restores mixed tab order from disk and appends newly recovered
   assert.equal(tabs[1].w.remote.host, 'worker');
   assert.deepEqual(tabOrderFor(session), ['b', 'remote', 'a']);
 });
+
+test('crash recovery saves watcher targets and preserves separate tabs for the same session', async () => {
+  const { parseLive } = await import('../server/live-snapshot.js');
+  const watch = { host: 'observer@example.invalid', session: 'work' };
+  addSaved('watchers', { id: 'dotted', name: 'watch', dir: '/tmp', watch });
+  const recovered = parseLive('watchers\t0\tlive\t0\t@1\t/tmp\t\tobserver@example.invalid/work\twatch');
+  saveOnStop(recovered);
+  assert.deepEqual(savedFor('watchers').map((w) => [w.id, w.watch]), [['live', watch], ['dotted', watch]]);
+  assert.equal(JSON.parse(fs.readFileSync(SAVED_FILE, 'utf8')).sessions.watchers[0].watch.host, watch.host);
+});

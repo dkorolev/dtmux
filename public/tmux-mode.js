@@ -40,6 +40,7 @@ export function startTmuxMode({ container, toolbar, params }) {
   let savedWindows = [];
   let remotes = []; // [{ name, label, color, noun, lifetime, paid, plan }] from ~/.dtmux.yaml
   const pending = new Map(); // long id -> saved window, tapped, not live yet
+  let idle = false;
   let haveState = false; // false while (re)connecting: the old tabs stay put, dimmed
   let draggingTab = false;
   const ORDER_KEY = `dtmux.tabOrder.${params.get('session') || ''}`;
@@ -116,6 +117,7 @@ export function startTmuxMode({ container, toolbar, params }) {
         case 'hello':
           if (reloadIfStale(msg.build)) return;
           stage.querySelector('.tmux-overlay.idle')?.remove();
+          idle = false;
           newWindowButton.disabled = false;
           setRemotes(msg.remotes);
           prefix = msg.prefix && msg.prefix !== 'None' ? msg.prefix : null;
@@ -275,7 +277,8 @@ export function startTmuxMode({ container, toolbar, params }) {
     liveWindows = [];
     activeWindow = null;
     activePane = null;
-    newWindowButton.disabled = true;
+    idle = true;
+    newWindowButton.disabled = false;
     toolbar.setStatus(params.get('session') ? `dtmux · ${session}` : 'dtmux', 'brand');
     haveState = true;
     renderTabs();
@@ -797,14 +800,14 @@ export function startTmuxMode({ container, toolbar, params }) {
           ? `${t.w.active ? 'active' : ''}${closingTabs.has(t.key) ? ' closing' : ''}`
           : t.kind === 'pending'
             ? 'saved pending'
-            : 'saved') + (t.w.remote ? ' remote' : '');
-      const tint = t.w.remote ? remoteOf(t.w).color : '';
+            : 'saved') + (t.w.remote || t.w.watch ? ' remote' : '');
+      const tint = t.w.watch ? WATCH_COLOR : t.w.remote ? remoteOf(t.w).color : '';
       if (el.style.getPropertyValue('--remote') !== tint) el.style.setProperty('--remote', tint);
       const title =
         t.kind === 'live'
           ? liveTabTitle(t.w)
           : t.kind === 'pending'
-            ? `${t.w.name}\n${t.w.remote ? `Joining ${remoteOf(t.w).label} ${remoteOf(t.w).noun} ${t.w.remote.host}…` : `Reopening in ${t.w.dir}…`}`
+            ? `${t.w.name}\n${t.w.watch ? 'Connecting over SSH…' : t.w.remote ? `Joining ${remoteOf(t.w).label} ${remoteOf(t.w).noun} ${t.w.remote.host}…` : `Reopening in ${t.w.dir}…`}`
             : savedTabTitle(t.w);
       el.dataset.tip = title;
       if (tip?.el === el) showTip(el); // open: show the fresh facts
@@ -834,7 +837,8 @@ export function startTmuxMode({ container, toolbar, params }) {
   function liveTabTitle(w) {
     const lines = [w.name];
     const info = tabInfo.get(w.id);
-    if (w.remote) {
+    if (w.watch) lines.push(`Watching ${w.watch.session} on ${w.watch.host} · read-only`);
+    else if (w.remote) {
       // Up since the machine was made, not since the tab opened (making takes minutes).
       const since = info?.upSince ?? w.remote.upSince;
       const up = since ? `  ·  up ${duration(Math.max(0, Math.round(Date.now() / 1000 - since)))}` : '  ·  being made…';
@@ -857,6 +861,8 @@ export function startTmuxMode({ container, toolbar, params }) {
     return lines.join('\n');
   }
   function savedTabTitle(w) {
+    if (w.watch)
+      return [w.name, `Tap to watch ${w.watch.session} on ${w.watch.host} again`, '', 'Drag to reorder · right-click for more'].join('\n');
     if (w.remote)
       return [
         w.name,
@@ -1075,9 +1081,11 @@ export function startTmuxMode({ container, toolbar, params }) {
             null,
             [
               'Disconnect',
-              t.w.remote
-                ? 'Close the ssh connection; the VM and its shells keep running, and tapping the dotted tab joins them again'
-                : 'Save this window and close it; a coding agent in it is closed first and resumes when you tap the dotted tab',
+              t.w.watch
+                ? 'Disconnect the watcher and keep the dotted tab'
+                : t.w.remote
+                  ? 'Close the ssh connection; the VM and its shells keep running, and tapping the dotted tab joins them again'
+                  : 'Save this window and close it; a coding agent in it is closed first and resumes when you tap the dotted tab',
               () => {
                 closingTabs.add(key);
                 setTimeout(() => closingTabs.delete(key) && renderTabs(), 10000);
@@ -1089,9 +1097,9 @@ export function startTmuxMode({ container, toolbar, params }) {
               ? deleteRemoteItem(t)
               : [
                   'Close',
-                  'Close this window for good, ending what runs in it; no dotted tab is kept',
+                  t.w.watch ? 'Remove this watcher' : 'Close this window for good, ending what runs in it; no dotted tab is kept',
                   () => {
-                    if (confirm(`Close "${t.w.name}" for good?\n\nThe window, and everything running in it, ends; no dotted tab is kept.`))
+                    if (t.w.watch || confirm(`Close "${t.w.name}" for good?\n\nThe window, and everything running in it, ends; no dotted tab is kept.`))
                       send({ t: 'close', w: t.w.id });
                   },
                 ],
@@ -1101,7 +1109,7 @@ export function startTmuxMode({ container, toolbar, params }) {
             null,
             [
               'Reopen',
-              t.w.remote ? `Join ${t.w.remote.host} again` : `Start it again in ${t.w.dir}`,
+              t.w.watch ? 'Reconnect the read-only viewer' : t.w.remote ? `Join ${t.w.remote.host} again` : `Start it again in ${t.w.dir}`,
               () => tabEls.get(key)?.click(),
             ],
             t.w.remote ? deleteRemoteItem(t) : ['Forget', 'Remove this dotted tab for good', () => send({ t: 'forget', id: key })],
@@ -1500,16 +1508,17 @@ export function startTmuxMode({ container, toolbar, params }) {
     return row;
   }
 
-  const newWindowButton = toolbar.addButton('+', () => send({ t: 'new-window' }), {
+  const WATCH_COLOR = '#65cf84';
+  const newLocalWindow = () => send({ t: idle ? 'new-session' : 'new-window' });
+  const newWindowButton = toolbar.addButton('+', newLocalWindow, {
     side: 'left',
-    title: 'New tmux window',
+    title: 'New tmux window · right-click for more',
   });
 
-  // Right-click on + (or a long press) offers the remotes of ~/.dtmux.yaml
-  // too: a new tab on a new machine there. Paid ones (VMs) ask first.
+  // Right-click on + (or a long press) offers an SSH watcher and the remotes
+  // from ~/.dtmux.yaml. Paid remotes ask before creating a machine.
   function setRemotes(list) {
     remotes = Array.isArray(list) ? list : [];
-    newWindowButton.title = remotes.length ? 'New tmux window · right-click for a remote machine' : 'New tmux window';
     renderTabs();
   }
   function showNewMenu() {
@@ -1517,8 +1526,9 @@ export function startTmuxMode({ container, toolbar, params }) {
     const r = newWindowButton.getBoundingClientRect();
     showMenu(
       [
-        ['New window', 'A new tmux window on this machine', () => send({ t: 'new-window' })],
-        ...remotes.map((x) => [
+        ['New window', 'A new tmux window on this machine', newLocalWindow],
+        ['Watch remote tmux…', 'Connect over SSH to an existing tmux session in read-only mode', newWatch, WATCH_COLOR],
+        ...(idle ? [] : remotes).map((x) => [
           `New ${x.label} ${x.noun}${x.paid ? '…' : ''}`,
           `A new tab on a new ${x.label} ${x.noun}${x.plan ? ` (${x.plan})` : ''}, ${x.lifetime}`,
           () => newRemote(x.name),
@@ -1530,6 +1540,10 @@ export function startTmuxMode({ container, toolbar, params }) {
     );
   }
   onMenuGesture(newWindowButton, showNewMenu);
+  function newWatch() {
+    const target = prompt("Paste an SSH/tmux command or enter host/session.\n\nExample: ssh -t my-host 'tmux attach -r -t work'")?.trim();
+    if (target) send({ t: 'new-watch', target });
+  }
   function newRemote(name) {
     const r = remotes.find((x) => x.name === name);
     if (!r) return;

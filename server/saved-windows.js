@@ -20,6 +20,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { STATE_DIR } from './paths.js';
+import { watchTarget } from './tmux-watch.js';
 
 export const SAVED_FILE = path.join(STATE_DIR, 'saved-windows.json');
 export const ID_OPTION = '@dtmux_id';
@@ -36,13 +37,15 @@ const isEntry = (e) =>
 const cleanAgent = (agent) =>
   agent && typeof agent.name === 'string' && typeof agent.command === 'string' && agent.command ? { name: agent.name, command: agent.command } : null;
 
-function clean({ id, name, autoName, dir, branch, agent, remote, panes, layout, activePane }) {
+function clean({ id, name, autoName, dir, branch, agent, remote, watch, panes, layout, activePane }) {
   const e = { id, name, autoName: Boolean(autoName), dir };
   if (remote && typeof remote.name === 'string' && typeof remote.host === 'string' && remote.name && remote.host) {
     e.remote = { name: remote.name, host: remote.host };
     if (typeof remote.address === 'string' && remote.address) e.remote.address = remote.address;
     if (Number.isInteger(remote.upSince)) e.remote.upSince = remote.upSince;
   }
+  const target = watchTarget(watch?.host, watch?.session);
+  if (target) e.watch = target;
   if (typeof branch === 'string' && branch) e.branch = branch;
   if (cleanAgent(agent)) e.agent = cleanAgent(agent);
   if (!e.remote && Array.isArray(panes) && panes.length > 1 && panes.length <= 64 && typeof layout === 'string' && /^[0-9a-f]{4},[0-9x,{}[\]]+$/.test(layout)) {
@@ -154,7 +157,7 @@ export function addSaved(session, entry) {
 // Without that, the window tmux must create to start a session after a
 // restart (a shell in ~) would add another copy to the list on every stop.
 const sameLook = (a, b) =>
-  a.name === b.name && a.dir === b.dir && a.autoName === b.autoName && a.remote?.host === b.remote?.host;
+  !a.watch && !b.watch && a.name === b.name && a.dir === b.dir && a.autoName === b.autoName && a.remote?.host === b.remote?.host;
 export function saveOnStop(live) {
   const next = new Map();
   for (const w of [...live].sort((a, b) => a.index - b.index)) {
