@@ -75,6 +75,10 @@ export class TmuxControl extends EventEmitter {
     this.proc.on('exit', (code, signal) => this._finish(`tmux exited (${signal ?? code})`));
   }
 
+  get pendingCommands() {
+    return this._pending.length;
+  }
+
   // Run one command. `cb(err, lines)` runs synchronously when its reply block
   // ends, before any later protocol line is processed. Callers rely on that
   // to switch pane output on at exactly the right point in the stream.

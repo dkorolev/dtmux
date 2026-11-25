@@ -345,6 +345,11 @@ in-memory daemon state that is not in tmux, on disk, or in the hand-over.
   the session across browsers. tmux renumbers its live windows to match, so
   prefix + digit follows the tabs. A tapped dotted tab opens in its own slot,
   and tabs stay put while the page reconnects or dtmux restarts.
+- Tab switches that take 500 ms or more emit diagnostics in the browser
+  console and, for slow tmux replies or state refreshes, in
+  `~/.dtmux/dtmux.log`. Match entries by request ID. Add `debugTabs=1` to the
+  page's URL query for every switch and for browser pointer, drag, and click
+  events. Set the browser console to show debug or verbose messages.
 - Right-click **+** and choose **Watch remote tmux…** to open a green,
   read-only tab for an existing tmux session. Paste a command such as
   `ssh -t my-host 'tmux attach -r -t work'`, or enter `my-host/work`.
