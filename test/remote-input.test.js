@@ -26,6 +26,18 @@ test('watcher accepts a pasted SSH attach command or target shorthand', async ()
   ]) assert.equal(parseWatchInput(input), null);
 });
 
+test('a refused watcher input is explained in plain, pasteable text', async () => {
+  const { watchInputProblem } = await import('../server/tmux-watch.js');
+  const input = "ssh -t dima2.personal '~/bench/watch.sh ~/bench/out'";
+  const text = watchInputProblem(input);
+  assert.match(text, /^dtmux \(a tmux web UI\) can watch/);
+  assert.ok(text.includes(`\n  ${input}\n`));
+  assert.match(text, /does not run other remote commands/);
+  assert.match(text, /please provide a single-line command in exactly this form:\n\n  ssh -t HOST 'tmux attach -r -t SESSION'\n/);
+  assert.match(watchInputProblem("ssh -t h 'tmux attach -t x; id'"), /tmux attach is not one dtmux accepts/);
+  assert.match(watchInputProblem('ssh h'), /no remote part/);
+});
+
 test('connecting remotes drop interrupts and read-only watchers drop all input', {
   skip: spawnSync('tmux', ['-V']).status !== 0,
 }, async () => {

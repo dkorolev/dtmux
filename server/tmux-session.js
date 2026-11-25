@@ -68,7 +68,7 @@ import { savedFor, allSaved, takeSaved, addSaved, renameSaved, savedEvents, newW
 import { issueDeleteCode, takeDeleteCode } from './delete-codes.js';
 import { REMOTE_OPTION, REMOTE_UP_OPTION, REMOTE_FORMAT, REMOTE_SUBSCRIPTION, parseRemote, remoteValue, currentRemotes, newHost, remoteCommand } from './remotes.js';
 import { pageRemotes } from './remote-config.js';
-import { WATCH_FORMAT, WATCH_OPTION, parseWatch, parseWatchInput, watchCommand, watchTarget, watchValue } from './tmux-watch.js';
+import { WATCH_FORMAT, WATCH_OPTION, parseWatch, parseWatchInput, watchCommand, watchInputProblem, watchTarget, watchValue } from './tmux-watch.js';
 import { SPLIT_HOOK, remoteAction, actionKeys } from './remote-keys.js';
 import { listPanes, agentsByPane, panesOf, windowAgent } from './window-panes.js';
 import { events as containerEvents, containerStatus, ensureImage } from './gh-check.js';
@@ -258,7 +258,7 @@ function storeTabOrder(session, order, send) {
 function newWatch({ target, host, session }, send) {
   const watch = target === undefined ? watchTarget(host, session) : parseWatchInput(target);
   if (watch) return { id: newWindowId(), name: watchValue(watch), dir: os.homedir(), watch };
-  send({ t: 'notice', text: "Enter host/session or an SSH command like ssh -t host 'tmux attach -r -t session'.", kind: 'bad' });
+  send({ t: 'watch-rejected', target: typeof target === 'string' ? target.slice(0, 1024) : '', text: watchInputProblem(target) });
   return null;
 }
 
