@@ -151,6 +151,9 @@ export function startTmuxMode({ container, toolbar, params }) {
         case 'prompt':
           showPrompt(msg);
           break;
+        case 'watch-rejected':
+          newWatch(msg.target, msg.text);
+          break;
         case 'notice':
           showNotice(msg.text, msg.kind, msg.p);
           break;
@@ -834,10 +837,11 @@ export function startTmuxMode({ container, toolbar, params }) {
   // The tooltip of a live tab: per pane, where it is, how long it has been
   // open and what runs there, coding agents by name. Fresh facts are asked
   // for whenever the pointer comes onto the tab.
+  const watchWhat = (w) => w.watch.session ?? w.watch.command;
   function liveTabTitle(w) {
     const lines = [w.name];
     const info = tabInfo.get(w.id);
-    if (w.watch) lines.push(`Watching ${w.watch.session} on ${w.watch.host} · read-only`);
+    if (w.watch) lines.push(`Watching ${watchWhat(w)} on ${w.watch.host} · read-only`);
     else if (w.remote) {
       // Up since the machine was made, not since the tab opened (making takes minutes).
       const since = info?.upSince ?? w.remote.upSince;
@@ -862,7 +866,7 @@ export function startTmuxMode({ container, toolbar, params }) {
   }
   function savedTabTitle(w) {
     if (w.watch)
-      return [w.name, `Tap to watch ${w.watch.session} on ${w.watch.host} again`, '', 'Drag to reorder · right-click for more'].join('\n');
+      return [w.name, `Tap to watch ${watchWhat(w)} on ${w.watch.host} again`, '', 'Drag to reorder · right-click for more'].join('\n');
     if (w.remote)
       return [
         w.name,
@@ -1540,9 +1544,82 @@ export function startTmuxMode({ container, toolbar, params }) {
     );
   }
   onMenuGesture(newWindowButton, showNewMenu);
-  function newWatch() {
-    const target = prompt("Paste an SSH/tmux command or enter host/session.\n\nExample: ssh -t my-host 'tmux attach -r -t work'")?.trim();
-    if (target) send({ t: 'new-watch', target });
+  // One wide, single-line field: a pasted SSH command fits on one line.
+  // A refused input comes back here with the daemon's explanation, shown in
+  // the dialog as selectable text (with a Copy button) beside the input.
+  function newWatch(value = '', problem = '') {
+    document.querySelector('.ask-watch')?.remove();
+    const shade = document.createElement('div');
+    shade.className = 'confirm-delete ask-watch';
+    const box = document.createElement('div');
+    box.className = 'box';
+    box.setAttribute('role', 'dialog');
+    box.setAttribute('aria-modal', 'true');
+    const title = document.createElement('strong');
+    title.textContent = 'Watch remote over SSH';
+    const text = document.createElement('p');
+    text.textContent = 'Paste an SSH command that attaches to tmux, or enter host/session. The tab is read-only.';
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.autocomplete = 'off';
+    input.spellcheck = false;
+    input.placeholder = "ssh -t my-host 'tmux attach -r -t work'";
+    input.setAttribute('aria-label', 'SSH command or host/session');
+    input.value = typeof value === 'string' ? value : '';
+    const note = document.createElement('p');
+    note.className = 'note';
+    note.textContent = 'The host must already be trusted and reachable with non-interactive SSH.';
+    const error = document.createElement('pre');
+    error.className = 'problem';
+    error.textContent = problem;
+    error.hidden = !problem;
+    const row = document.createElement('div');
+    row.className = 'buttons';
+    const copy = document.createElement('button');
+    copy.className = 'copy';
+    copy.textContent = 'Copy error';
+    copy.hidden = !problem;
+    copy.addEventListener('click', () => {
+      const done = () => (copy.textContent = 'Copied');
+      navigator.clipboard?.writeText(problem).then(done, () => {
+        getSelection().selectAllChildren(error);
+        copy.textContent = 'Selected: press ⌘C';
+      }) ?? getSelection().selectAllChildren(error);
+    });
+    const cancel = document.createElement('button');
+    cancel.textContent = 'Cancel';
+    const ok = document.createElement('button');
+    ok.className = 'go';
+    ok.textContent = 'Watch';
+    row.append(copy, cancel, ok);
+    box.append(title, text, input, error, note, row);
+    shade.append(box);
+    document.body.append(shade);
+    const close = () => {
+      shade.remove();
+      panes.get(activePane)?.term.focus();
+    };
+    const go = () => {
+      const target = input.value.trim();
+      if (!target) return input.focus();
+      close();
+      send({ t: 'new-watch', target });
+    };
+    ok.addEventListener('click', go);
+    cancel.addEventListener('click', close);
+    shade.addEventListener('mousedown', (e) => e.target === shade && close());
+    box.addEventListener('keydown', (e) => {
+      e.stopPropagation(); // not for the terminal or the page's own keys
+      if (e.key === 'Escape') close();
+      else if (e.key === 'Enter' && e.target === input) {
+        e.preventDefault();
+        go();
+      }
+    });
+    setTimeout(() => {
+      input.focus(); // after a menu hands focus back to the terminal
+      if (problem) input.select();
+    });
   }
   function newRemote(name) {
     const r = remotes.find((x) => x.name === name);
