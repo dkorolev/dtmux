@@ -57,6 +57,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFile, execFileSync } from 'node:child_process';
+import { EventEmitter } from 'node:events';
 import { TmuxControl, TMUX_BIN, quote, tmuxArgs } from './tmux-control.js';
 import { trackKitty, recordKittyCommand, kittyRestoreSequence, forgetPane } from './kitty-tracker.js';
 import { openExternal } from './open-external.js';
@@ -152,26 +153,35 @@ const pageEntry = ({ id, name, dir, branch, agent, remote, watch }) => ({
 
 // Delete a remote tab's machine for good, the page having asked (`why`, for
 // the log); `send` reports how it went.
-function deleteTabMachine(where, why, send) {
+async function deleteTabMachine(where, why, send) {
   let remote;
   try {
     remote = currentRemotes()[where.name];
   } catch (err) {
-    return send({ t: 'notice', text: err.message, kind: 'bad' });
+    send({ t: 'notice', text: err.message, kind: 'bad' });
+    return false;
   }
-  if (!remote) return send({ t: 'notice', text: `No remote "${where.name}" in ~/.dtmux.yaml: ${where.host} was not deleted.`, kind: 'bad' });
+  if (!remote) {
+    send({ t: 'notice', text: `No remote "${where.name}" in ~/.dtmux.yaml: ${where.host} was not deleted.`, kind: 'bad' });
+    return false;
+  }
   const kind = kindOf(remote);
   send({ t: 'notice', text: `Deleting ${remote.label} ${kind.noun} ${where.host}…` });
-  deleteMachine(remote, where.host, `page: ${why}`).then(
-    () => {
-      try {
-        dropMachine(where.name, where.host);
-      } catch {} // the sweep drops it once it sees the machine gone
-      send({ t: 'notice', text: `Deleted ${remote.label} ${kind.noun} ${where.host}.` });
-    },
-    (err) => send({ t: 'notice', text: `Could not delete ${where.host}: ${err.message}`, kind: 'bad' }),
-  );
+  try {
+    await deleteMachine(remote, where.host, `page: ${why}`);
+  } catch (err) {
+    send({ t: 'notice', text: `Could not delete ${where.host}: ${err.message}`, kind: 'bad' });
+    return false;
+  }
+  try {
+    dropMachine(where.name, where.host);
+  } catch {} // the sweep drops it once it sees the machine gone
+  send({ t: 'notice', text: `Deleted ${remote.label} ${kind.noun} ${where.host}.` });
+  return true;
 }
+
+const deletingWindows = new Set();
+const deletionEvents = new EventEmitter().setMaxListeners(0);
 
 // Deleting a remote tab's machine takes the four digits the daemon issued for
 // that tab (see delete-codes.js); the page shows them and the user types them.
@@ -429,6 +439,7 @@ function bridge(ws, opts) {
   savedEvents.on('change', onSavedChange);
   const onContainer = (status) => send({ t: 'container', status });
   containerEvents.on('change', onContainer);
+  deletionEvents.on('change', scheduleRefresh);
   loadBindings();
   refresh();
   for (const entry of reopen) openSaved(entry);
@@ -660,7 +671,7 @@ function bridge(ws, opts) {
           tmux.run(`set-option -w -t ${id} ${ID_OPTION} ${uid}`);
         }
         const where = parseRemote(remote); // upSince: null while the VM is being made
-        return { id, uid, index: Number(index), active: active === '1', layout, remote: where, watch: parseWatch(watchVal), name: name.join('\t') };
+        return { id, uid, index: Number(index), active: active === '1', layout, remote: where, deleting: deletingWindows.has(id), watch: parseWatch(watchVal), name: name.join('\t') };
       });
       const list = p.lines.filter(Boolean).map((l) => {
         const [id, window, active, width, height, cmd] = l.split('\t');
@@ -729,6 +740,7 @@ function bridge(ws, opts) {
     ws.off('close', detach);
     savedEvents.off('change', onSavedChange);
     containerEvents.off('change', onContainer);
+    deletionEvents.off('change', scheduleRefresh);
     clearTimeout(refreshTimer);
     finishSwitch('disconnected');
     tmux.close();
@@ -915,14 +927,14 @@ function bridge(ws, opts) {
   // agent-close.js), so its resume command is saved with the window.
   const closing = new Set();
   function disconnectWindow(w) {
-    if (closing.has(w)) return;
+    if (closing.has(w) || deletingWindows.has(w)) return;
     const format = ['#{window_id}', `#{${ID_OPTION}}`, '#{automatic-rename}', '#{pane_current_path}', REMOTE_FORMAT, WATCH_FORMAT, '#{window_name}'].join('\t');
     tmux.run(`display -p -t ${w} ${quote(format)}`, async (err, lines) => {
       if (err || !lines[0]) return;
       const [id, uid, auto, dir, remoteVal, watchVal, ...name] = lines[0].split('\t');
       const remote = parseRemote(remoteVal);
       const watch = parseWatch(watchVal);
-      if (id !== w) return; // tmux fell back to another window: that one is not ours to close
+      if (id !== w || deletingWindows.has(w)) return;
       closing.add(w);
       // Programs in a remote tmux keep running after the local viewer closes.
       const agents = remote || watch ? [] : await closeAgents(session, { target: w, log: (m) => console.log(`[${session}] ${m}`) });
@@ -948,22 +960,35 @@ function bridge(ws, opts) {
     });
   }
 
-  // Close a window for good: no dotted tab. From outside the window, so a
-  // stuck one (a frozen ssh, say) closes too. A remote tab closed for good
-  // takes its machine with it (Disconnect is the way to keep the machine):
-  // nothing would ever join it again, and it would run on, maybe at a cost.
-  // That needs the code issued for the window (see delete-codes.js).
+  // Leave the remote terminal visible until the provider confirms deletion.
   function closeWindow(w, code) {
-    tmux.run(`display -p -t ${w} ${quote(`#{window_id}\t${REMOTE_FORMAT}`)}`, (err, lines) => {
+    tmux.run(`display -p -t ${w} ${quote(`#{window_id}\t${REMOTE_FORMAT}`)}`, async (err, lines) => {
       if (err || !lines[0]) return;
       const [id, remoteVal] = lines[0].split('\t');
-      if (id !== w) return; // tmux fell back to another window: not ours to close
+      if (id !== w || deletingWindows.has(w)) return;
       const where = parseRemote(remoteVal);
-      if (where && !deleteConfirmed(`w:${w}`, code, send)) return;
-      execFile(TMUX_BIN, tmuxArgs('kill-window', '-t', w), (e, _o, stderr) => {
-        if (e && !/can't find window/.test(stderr)) send({ t: 'notice', text: `Could not close the window: ${stderr.trim() || e.message}`, kind: 'bad' });
+      if (!where) return killWindow(w);
+      if (!deleteConfirmed(`w:${w}`, code, send)) return;
+      deletingWindows.add(w);
+      tmux.run(`select-window -t ${w}`);
+      deletionEvents.emit('change');
+      try {
+        if (await deleteTabMachine(where, 'Delete on its tab (code confirmed)', send)) await killWindow(w);
+      } finally {
+        deletingWindows.delete(w);
+        deletionEvents.emit('change');
+      }
+    });
+  }
+
+  function killWindow(w) {
+    return new Promise((resolve) => {
+      execFile(TMUX_BIN, tmuxArgs('kill-window', '-t', w), (err, _out, stderr) => {
+        if (err && !/can't find window/.test(stderr)) {
+          send({ t: 'notice', text: `Could not close the window: ${stderr.trim() || err.message}`, kind: 'bad' });
+        }
+        resolve();
       });
-      if (where) deleteTabMachine(where, 'Delete on its tab (code confirmed)', send);
     });
   }
 

@@ -563,6 +563,10 @@ body {
   border-color: var(--remote);
   color: var(--fg);
 }
+#toolbar .tabs button.remote.deleting {
+  border-color: var(--remote);
+  background: color-mix(in srgb, var(--remote) 22%, #333);
+}
 
 
 /* A remote tab whose session ended: reconnect, delete the machine, or close. */
