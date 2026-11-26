@@ -10,9 +10,11 @@
 import { createTerminal, leaveQueriesToTmux, base64ToBytes, socketUrl, DEFAULT_TEXT_SIZE, TEXT_SIZE_MIN, TEXT_SIZE_MAX, textSize, saveTextSize } from './terminal-common.js';
 import { attachImagePaste, fileToMessage, flashPastedImage } from './paste-image.js';
 import { makePanels } from './panels.js';
+import { tabSwitchDebug } from './tab-switch-debug.js';
 import { orderTabs, parseLayout, paneBorders, tmuxKeyName, windowSwitchDirection } from './tmux-util.js';
 
 export function startTmuxMode({ container, toolbar, params }) {
+  const tabDebug = tabSwitchDebug(params.get('debugTabs') === '1');
   const stage = document.createElement('div');
   stage.className = 'tmux-stage';
   container.append(stage);
@@ -100,6 +102,7 @@ export function startTmuxMode({ container, toolbar, params }) {
       toolbar.setStatus('connected', 'ok');
     };
     ws.onclose = (ev) => {
+      tabDebug.disconnected();
       if (ev.code === TAKEN_CODE) showTaken();
       else if (!ended) retryConnect(ev.reason);
     };
@@ -129,8 +132,14 @@ export function startTmuxMode({ container, toolbar, params }) {
             `tmux session "${msg.session}" · prefix ${prefix ?? 'none'} · ${grid.cols}×${grid.rows}${commit ? ` · ${commit}` : ''}\nRight-click: selection mode, restart`,
           );
           break;
-        case 'state':
+        case 'state': {
+          const receivedAt = performance.now();
           applyState(msg);
+          tabDebug.applied(msg.tabSwitch, activeWindow, receivedAt);
+          break;
+        }
+        case 'tab-switch':
+          tabDebug.progress(msg);
           break;
         case 'init': {
           // A terminal kept across a reconnect starts over from the snapshot.
@@ -940,6 +949,7 @@ export function startTmuxMode({ container, toolbar, params }) {
     });
     b.addEventListener('pointerleave', () => hideTip());
     b.addEventListener('pointerdown', (e) => {
+      tabDebug.event('pointerdown', { key, button: e.button, pointerType: e.pointerType, eventTime: e.timeStamp });
       hideTip();
       startTabDrag(e, b);
     });
@@ -947,12 +957,16 @@ export function startTmuxMode({ container, toolbar, params }) {
       e.preventDefault();
       showTabMenu(key, e.clientX, e.clientY);
     });
-    b.addEventListener('click', () => {
+    b.addEventListener('click', (e) => {
       const t = tabItems.get(key);
-      if (!t || !haveState) return;
+      tabDebug.event('click', { key, kind: t?.kind, haveState, dispatchMs: Math.round(performance.now() - e.timeStamp) });
+      if (!t || !haveState) {
+        tabDebug.skipped({ key, reason: t ? 'waiting for state' : 'tab no longer present', socketState: ws?.readyState });
+        return;
+      }
       clickedTab = { key, at: Date.now() };
       if (t.kind === 'live') {
-        send({ t: 'select-window', w: t.w.id });
+        requestTabSwitch(t.w.id, 'click');
         panes.get(activePane)?.term.focus();
       } else if (t.kind === 'saved') {
         pending.set(key, t.w);
@@ -984,6 +998,7 @@ export function startTmuxMode({ container, toolbar, params }) {
       if (!moved) {
         if (Math.abs(dx) < 5) return;
         moved = true;
+        tabDebug.event('drag started', { key: el.dataset.key, dx });
         draggingTab = true;
         el.classList.add('dragging');
       }
@@ -1354,7 +1369,16 @@ export function startTmuxMode({ container, toolbar, params }) {
     const i = order.findIndex((w) => w.id === activeWindow);
     const next = order[(i + dir + order.length) % order.length];
     if (!next || next.id === activeWindow) return;
-    send({ t: 'select-window', w: next.id });
+    requestTabSwitch(next.id, 'keyboard');
+  }
+
+  function requestTabSwitch(window, source) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      tabDebug.skipped({ window, source, reason: 'socket is not open', socketState: ws?.readyState });
+      return;
+    }
+    const trace = tabDebug.start(ws, window, activeWindow, source);
+    send({ t: 'select-window', w: window, trace });
   }
   const eatWindowSwitch = (e) => {
     if (!windowSwitchDirection(e)) return;

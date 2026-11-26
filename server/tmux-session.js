@@ -6,6 +6,7 @@
 //   hello  { session, prefix, commit, build, remotes }  once attached; `build`
 //                                         fingerprints the page's files, see app.js;
 //                                         `remotes`: [{ name, label, color, plan, ttlSeconds }]
+//   tab-switch { id, stage, … }  progress for a traced select-window
 //   state  { windows, panes }             after any structural change; each
 //                                         window carries its long id as `uid`, and
 //                                         `remote` { name, host, address, upSince, ended } when on
@@ -33,7 +34,7 @@
 //   size   { cols, rows }   the browser's grid size for the whole session
 //   keys   { keys }         tmux key names routed through tmux key bindings
 //   answer { id, values }   the reply to a prompt; values null when cancelled
-//   select-window { w }, select-pane { p }, new-window, open { url }
+//   select-window { w, trace?: { id, verbose } }, select-pane { p }, new-window, open { url }
 //   new-watch { target }  watch an existing tmux session over SSH
 //   new-remote { name }    a new tab on a new VM of that remote (see remotes.js)
 //   resize-pane { p, axis, size }  drag a border; axis "x" (width) or "y" (height)
@@ -368,6 +369,7 @@ function bridge(ws, opts) {
   const journaled = new Set(); // resume commands already shown this connection
   let clientName = null;
   let refreshTimer = null;
+  let tabSwitch = null;
   let bindings = new Map(); // prefix-table key -> command
   let prompt = null; // the binding waiting for the browser's answer
   let promptSeq = 0;
@@ -570,6 +572,65 @@ function bridge(ws, opts) {
     }, 150);
   }
 
+  function switchDetails(trace) {
+    return {
+      ...trace.details,
+      elapsedMs: Math.round(performance.now() - trace.started),
+      pendingTmuxCommands: tmux.pendingCommands,
+      socketBufferedBytes: ws.bufferedAmount,
+    };
+  }
+
+  function logSwitch(stage, details) {
+    console.log('[dtmux tab switch]', JSON.stringify({ session, stage, ...details }));
+  }
+
+  function finishSwitch(stage) {
+    const trace = tabSwitch;
+    if (!trace) return;
+    tabSwitch = null;
+    clearTimeout(trace.timer);
+    const details = switchDetails(trace);
+    if (trace.verbose || details.elapsedMs >= 500 || details.error) logSwitch(stage, details);
+    return details;
+  }
+
+  function reportSwitch(stage, fields = {}) {
+    const trace = tabSwitch;
+    Object.assign(trace.details, fields);
+    const details = switchDetails(trace);
+    if (trace.verbose) logSwitch(stage, details);
+    send({ t: 'tab-switch', stage, ...details });
+  }
+
+  function selectWindow(window, request) {
+    if (typeof request?.id !== 'string' || !/^[0-9a-f-]{36}$/.test(request.id)) {
+      tmux.run(`select-window -t ${window}`);
+      return;
+    }
+    finishSwitch('superseded');
+    const trace = {
+      started: performance.now(),
+      verbose: request.verbose === true,
+      details: { id: request.id, window, queuedTmuxCommandsAtReceive: tmux.pendingCommands },
+      repliedAt: null,
+      stage: 'received',
+    };
+    tabSwitch = trace;
+    trace.timer = setTimeout(() => logSwitch('still pending', { milestone: trace.stage, ...switchDetails(trace) }), 500);
+    reportSwitch(trace.stage);
+    tmux.run(`select-window -t ${window}`, (err) => {
+      if (trace !== tabSwitch) return;
+      trace.stage = 'tmux replied';
+      trace.repliedAt = performance.now();
+      const result = { tmuxReplyMs: Math.round(trace.repliedAt - trace.started) };
+      if (err) result.error = err.message;
+      reportSwitch(trace.stage, result);
+      if (err) finishSwitch('failed');
+      else scheduleRefresh();
+    });
+  }
+
   function scheduleRefresh() {
     if (refreshTimer) return;
     refreshTimer = setTimeout(() => {
@@ -579,8 +640,17 @@ function bridge(ws, opts) {
   }
 
   function refresh() {
+    const trace = tabSwitch?.repliedAt != null ? tabSwitch : null;
+    const refreshStarted = trace ? performance.now() : null;
+    if (trace) trace.stage = 'refreshing state';
     tmux.runList([`list-windows -F ${quote(WINDOW_FORMAT)}`, `list-panes -s -F ${quote(PANE_FORMAT)}`], ([w, p]) => {
-      if (w.err || p.err) return;
+      if (w.err || p.err) {
+        if (trace && trace === tabSwitch) {
+          reportSwitch('refresh failed', { error: (w.err ?? p.err).message });
+          finishSwitch('failed');
+        }
+        return;
+      }
       const windows = w.lines.filter(Boolean).map((l) => {
         let [id, index, active, layout, uid, remote, watchVal, ...name] = l.split('\t');
         // Every window gets a long unique id the first time we see it, so a
@@ -597,7 +667,18 @@ function bridge(ws, opts) {
         return { id, window, active: active === '1', width: Number(width), height: Number(height), cmd };
       });
       view = { windows, panes: list };
-      send({ t: 'state', windows, panes: list });
+      const state = { t: 'state', windows, panes: list };
+      if (trace && trace === tabSwitch) {
+        const active = windows.find((window) => window.active)?.id ?? null;
+        Object.assign(trace.details, {
+          active,
+          refreshWaitMs: Math.max(0, Math.round(refreshStarted - trace.repliedAt)),
+          refreshMs: Math.round(performance.now() - refreshStarted),
+        });
+        if (active !== trace.details.window) trace.details.error = 'Refreshed state has a different active window';
+        state.tabSwitch = finishSwitch('sending state');
+      }
+      send(state);
       const live = new Set(list.map((x) => x.id));
       for (const id of panes.keys()) {
         if (!live.has(id)) {
@@ -649,6 +730,7 @@ function bridge(ws, opts) {
     savedEvents.off('change', onSavedChange);
     containerEvents.off('change', onContainer);
     clearTimeout(refreshTimer);
+    finishSwitch('disconnected');
     tmux.close();
   }
   function onMessage(raw) {
@@ -694,7 +776,7 @@ function bridge(ws, opts) {
         answer(msg.id, msg.values);
         break;
       case 'select-window':
-        if (isWindowId(msg.w)) tmux.run(`select-window -t ${msg.w}`);
+        if (isWindowId(msg.w)) selectWindow(msg.w, msg.trace);
         break;
       case 'select-pane':
         if (isPaneId(msg.p)) tmux.run(`select-pane -t ${msg.p}`);
