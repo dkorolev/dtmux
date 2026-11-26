@@ -150,7 +150,8 @@ remotes:
 - **Delete, not close.** A remote tab has no Close: right-click it for
   **Delete the VM / account…** (live or dotted), which deletes the machine,
   and the tab goes with it. A live tab turns red and shows its terminal
-  while deletion runs. If deletion fails, the tab stays open. It works
+  while deletion runs, and for five seconds after it succeeds, then closes.
+  If deletion fails, the tab stays open. It works
   on a stuck tab too. Every delete asks
   you to type four random digits it shows, then **Confirm delete** (or
   Enter); a single press of Enter on a red button is not enough. The daemon

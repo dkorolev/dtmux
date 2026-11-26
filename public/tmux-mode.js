@@ -813,7 +813,7 @@ export function startTmuxMode({ container, toolbar, params }) {
           : t.kind === 'pending'
             ? 'saved pending'
             : 'saved') + (t.w.remote || t.w.watch ? ' remote' : '');
-      el.classList.toggle('deleting', t.kind === 'live' && t.w.deleting === true);
+      el.classList.toggle('deleting', t.kind === 'live' && !!t.w.deleting);
       const tint = t.w.deleting ? '#ff6b6b' : t.w.watch ? WATCH_COLOR : t.w.remote ? remoteOf(t.w).color : '';
       if (el.style.getPropertyValue('--remote') !== tint) el.style.setProperty('--remote', tint);
       const title =
@@ -851,7 +851,7 @@ export function startTmuxMode({ container, toolbar, params }) {
   function liveTabTitle(w) {
     const lines = [w.name];
     if (w.uid) lines.push(`dtmux ID: ${w.uid}`);
-    if (w.deleting) lines.push(`Deleting the ${remoteOf(w).noun}…`);
+    if (w.deleting) lines.push(w.deleting === 'deleted' ? `Deleted the ${remoteOf(w).noun}; this tab closes in a moment.` : `Deleting the ${remoteOf(w).noun}…`);
     const info = tabInfo.get(w.id);
     if (w.watch) lines.push(`Watching ${watchWhat(w)} on ${w.watch.host} · read-only`);
     else if (w.remote) {
