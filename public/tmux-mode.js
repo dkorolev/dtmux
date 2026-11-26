@@ -600,7 +600,7 @@ export function startTmuxMode({ container, toolbar, params }) {
   // as keys, which is what the buttons press).
   function renderEnded(w, winEl, pane) {
     let box = winEl.querySelector(':scope > .remote-ended');
-    if (!w.remote?.ended || !pane) return box?.remove();
+    if (!w.remote?.ended || w.deleting || !pane) return box?.remove();
     const r = remoteOf(w);
     if (box?.dataset.host === w.remote.host) return;
     box?.remove();
@@ -813,7 +813,8 @@ export function startTmuxMode({ container, toolbar, params }) {
           : t.kind === 'pending'
             ? 'saved pending'
             : 'saved') + (t.w.remote || t.w.watch ? ' remote' : '');
-      const tint = t.w.watch ? WATCH_COLOR : t.w.remote ? remoteOf(t.w).color : '';
+      el.classList.toggle('deleting', t.kind === 'live' && t.w.deleting === true);
+      const tint = t.w.deleting ? '#ff6b6b' : t.w.watch ? WATCH_COLOR : t.w.remote ? remoteOf(t.w).color : '';
       if (el.style.getPropertyValue('--remote') !== tint) el.style.setProperty('--remote', tint);
       const title =
         t.kind === 'live'
@@ -849,6 +850,8 @@ export function startTmuxMode({ container, toolbar, params }) {
   const watchWhat = (w) => w.watch.session ?? w.watch.command;
   function liveTabTitle(w) {
     const lines = [w.name];
+    if (w.uid) lines.push(`dtmux ID: ${w.uid}`);
+    if (w.deleting) lines.push(`Deleting the ${remoteOf(w).noun}…`);
     const info = tabInfo.get(w.id);
     if (w.watch) lines.push(`Watching ${watchWhat(w)} on ${w.watch.host} · read-only`);
     else if (w.remote) {
@@ -1089,6 +1092,15 @@ export function startTmuxMode({ container, toolbar, params }) {
     const t = tabItems.get(key);
     if (!t || !haveState || t.kind === 'pending') return;
     const rename = ['Rename…', 'Give this tab a name of your own', () => renameTab(key)];
+    const copyId = ['Copy dtmux ID', t.w.uid, async () => {
+      try {
+        await navigator.clipboard.writeText(t.w.uid);
+        showNotice('Copied the dtmux tab ID.');
+      } catch {
+        window.prompt('Copy the dtmux tab ID', t.w.uid);
+      }
+    }];
+    if (t.w.deleting) return showMenu([copyId], x, y);
     const ghItem = t.w.remote
       ? [['gh…', `GitHub CLI on ${t.w.remote.host}: who it is logged in as; log it in with this Mac's token, or out`, () => panels.showGh({ ...t, remoteInfo: remoteOf(t.w) })]]
       : [];
@@ -1096,6 +1108,7 @@ export function startTmuxMode({ container, toolbar, params }) {
       t.kind === 'live'
         ? [
             rename,
+            copyId,
             ...ghItem,
             null,
             [
@@ -1224,7 +1237,7 @@ export function startTmuxMode({ container, toolbar, params }) {
     const what = `${r.label} ${r.noun} ${t.w.remote.host}`;
     return [
       `Delete the ${r.noun}…`,
-      `Delete ${what}; this tab goes with it`,
+      t.kind === 'live' ? `Keep this terminal visible while ${what} is deleted` : `Delete ${what}; this tab goes with it`,
       () => {
         const target = t.kind === 'live' ? { w: t.w.id } : { id: t.key };
         askDeleteCode(target, (code) =>

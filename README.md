@@ -145,9 +145,13 @@ remotes:
   Rebuild builds it again from scratch for a newer `gh`.
 - **Rename** is on every tab's menu, live or dotted: the label turns into a
   text field, Enter keeps the name, Esc does not.
+- **Copy dtmux ID** is on every live tab's menu. The same ID appears in the
+  tab tooltip and identifies the window across disconnects and renames.
 - **Delete, not close.** A remote tab has no Close: right-click it for
   **Delete the VM / account…** (live or dotted), which deletes the machine,
-  and the tab goes with it. It works on a stuck tab too. Every delete asks
+  and the tab goes with it. A live tab turns red and shows its terminal
+  while deletion runs. If deletion fails, the tab stays open. It works
+  on a stuck tab too. Every delete asks
   you to type four random digits it shows, then **Confirm delete** (or
   Enter); a single press of Enter on a red button is not enough. The daemon
   issues those digits and checks them itself, once and for a minute, so a
