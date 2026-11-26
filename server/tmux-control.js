@@ -65,7 +65,7 @@ export class TmuxControl extends EventEmitter {
     );
     this._buf = Buffer.alloc(0);
     this._block = null;
-    this._pending = []; // one { cb } per command, or { mark, ... } for runLine
+    this._pending = []; // one { batch, cb } per command, or { mark, ... } for runLine
     this._marks = 0;
     this.closed = false;
     this.proc.stdout.on('data', (chunk) => this._onData(chunk));
@@ -97,6 +97,7 @@ export class TmuxControl extends EventEmitter {
     let left = cmds.length;
     cmds.forEach((_, i) =>
       this._pending.push({
+        batch: results,
         cb: (err, lines) => {
           results[i] = { err, lines };
           if (--left === 0) cb(results);
@@ -156,7 +157,14 @@ export class TmuxControl extends EventEmitter {
         const err = head.startsWith('%error') ? new Error(lines.join('\n') || 'tmux error') : null;
         if (!p.mark) {
           this._pending.shift();
+          // tmux discards the rest of a command list on error. Remove those
+          // entries before any callback can enqueue another command.
+          const skipped = [];
+          if (err) {
+            while (this._pending[0]?.batch === p.batch) skipped.push(this._pending.shift());
+          }
           p.cb(err, lines);
+          for (const entry of skipped) entry.cb(err, []);
         } else if (!err && lines.length === 1 && lines[0] === p.mark) {
           this._pending.shift();
           p.cb(p.err, p.lines);

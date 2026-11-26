@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { decodeOutput, quote } from '../server/tmux-control.js';
+import { decodeOutput, quote, TmuxControl } from '../server/tmux-control.js';
 import { trackKitty, kittyRestoreSequence, recordKittyCommand, forgetPane } from '../server/kitty-tracker.js';
 import { macLineEdit, macWordEdit, orderTabs, parseLayout, paneBorders, tabStripDelta, tmuxKeyName, windowSwitchDirection } from '../public/tmux-util.js';
 import { tokenize, parseBinding, fillTemplate } from '../server/tmux-bindings.js';
@@ -20,6 +20,43 @@ test('decodeOutput turns octal escapes back into bytes and keeps raw UTF-8', () 
 
 test('quote escapes tmux double-quote specials', () => {
   assert.equal(quote('a"b$c\\d'), '"a\\"b\\$c\\\\d"');
+});
+
+test('a tmux command error skips only the remaining replies in its batch', () => {
+  const control = Object.assign(Object.create(TmuxControl.prototype), {
+    _pending: [],
+    _block: null,
+    _marks: 0,
+    proc: { stdin: { write() {} } },
+  });
+  let batch;
+  let line;
+  let next;
+  control.runList(['display -p before', 'capture-pane -p -t %999', 'display -p skipped'], (results) => {
+    batch = results;
+  });
+  control.runLine('display -p after', (err, lines) => { line = { err, lines }; });
+  control.run('display -p next', (err, lines) => { next = { err, lines }; });
+
+  const reply = (id, status, output) => {
+    for (const line of [`%begin 1 ${id} 1`, output, `%${status} 1 ${id} 1`]) {
+      control._onLine(Buffer.from(line));
+    }
+  };
+  reply(1, 'end', 'before');
+  assert.equal(batch, undefined);
+  reply(2, 'error', "can't find pane: %999");
+  assert.deepEqual(batch.map(({ err, lines }) => [err?.message, lines]), [
+    [undefined, ['before']],
+    ["can't find pane: %999", ["can't find pane: %999"]],
+    ["can't find pane: %999", []],
+  ]);
+  reply(3, 'end', 'after');
+  reply(4, 'end', 'dtmux-mark-1');
+  reply(5, 'end', 'next');
+  assert.deepEqual(line, { err: null, lines: ['after'] });
+  assert.deepEqual(next, { err: null, lines: ['next'] });
+  assert.equal(control.pendingCommands, 0);
 });
 
 test('kitty tracker follows push, pop and set, across chunk boundaries', () => {
