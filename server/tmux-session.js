@@ -180,7 +180,11 @@ async function deleteTabMachine(where, why, send) {
   return true;
 }
 
-const deletingWindows = new Set();
+// Window id -> 'deleting' while the provider removes its machine, then
+// 'deleted' for DELETED_LINGER_MS: a deletion can take a second, and a tab
+// that vanished at once would look closed, not deleted.
+const deletingWindows = new Map();
+const DELETED_LINGER_MS = 5000;
 const deletionEvents = new EventEmitter().setMaxListeners(0);
 
 // Deleting a remote tab's machine takes the four digits the daemon issued for
@@ -671,7 +675,7 @@ function bridge(ws, opts) {
           tmux.run(`set-option -w -t ${id} ${ID_OPTION} ${uid}`);
         }
         const where = parseRemote(remote); // upSince: null while the VM is being made
-        return { id, uid, index: Number(index), active: active === '1', layout, remote: where, deleting: deletingWindows.has(id), watch: parseWatch(watchVal), name: name.join('\t') };
+        return { id, uid, index: Number(index), active: active === '1', layout, remote: where, deleting: deletingWindows.get(id) ?? false, watch: parseWatch(watchVal), name: name.join('\t') };
       });
       const list = p.lines.filter(Boolean).map((l) => {
         const [id, window, active, width, height, cmd] = l.split('\t');
@@ -969,11 +973,16 @@ function bridge(ws, opts) {
       const where = parseRemote(remoteVal);
       if (!where) return killWindow(w);
       if (!deleteConfirmed(`w:${w}`, code, send)) return;
-      deletingWindows.add(w);
+      deletingWindows.set(w, 'deleting');
       tmux.run(`select-window -t ${w}`);
       deletionEvents.emit('change');
       try {
-        if (await deleteTabMachine(where, 'Delete on its tab (code confirmed)', send)) await killWindow(w);
+        if (await deleteTabMachine(where, 'Delete on its tab (code confirmed)', send)) {
+          deletingWindows.set(w, 'deleted');
+          deletionEvents.emit('change');
+          await new Promise((r) => setTimeout(r, DELETED_LINGER_MS));
+          await killWindow(w);
+        }
       } finally {
         deletingWindows.delete(w);
         deletionEvents.emit('change');
